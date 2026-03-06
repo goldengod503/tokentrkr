@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 use cosmic::iced::{window::Id, Alignment, Length, Limits, Subscription};
 use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
@@ -26,6 +27,9 @@ pub struct TokenTrkrApplet {
     error: Option<String>,
     config: Config,
     provider: Option<Arc<dyn Provider>>,
+    refreshing: bool,
+    spin_phase: f32,
+    refresh_tx: Option<mpsc::Sender<()>>,
 }
 
 impl Default for TokenTrkrApplet {
@@ -37,6 +41,9 @@ impl Default for TokenTrkrApplet {
             error: None,
             config: Config::default(),
             provider: None,
+            refreshing: false,
+            spin_phase: 0.0,
+            refresh_tx: None,
         }
     }
 }
@@ -48,6 +55,9 @@ pub enum Message {
     UsageUpdate(Result<UsageSnapshot, String>),
     RefreshNow,
     OpenDashboard,
+    Tick,
+    FetchStarted,
+    SetRefreshChannel(mpsc::Sender<()>),
 }
 
 fn bucket_color(pct: f64) -> cosmic::iced::Color {
@@ -151,20 +161,47 @@ impl cosmic::Application for TokenTrkrApplet {
 
         let color = bucket_color(pct);
 
-        // Colored dot indicator
+        // During refresh: show a spinning arc; otherwise solid dot
+        let refreshing = self.refreshing;
+        let spin = self.spin_phase;
+
         let dot = widget::container(widget::horizontal_space())
             .width(12)
             .height(12)
-            .style(move |_theme: &Theme| container::Style {
-                background: Some(color.into()),
-                border: cosmic::iced::Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
-                },
-                ..container::Style::default()
+            .style(move |_theme: &Theme| {
+                if refreshing {
+                    // Spinning effect: partial arc via gradient-like opacity shift
+                    let alpha = 0.3 + 0.7 * ((spin.sin() + 1.0) / 2.0);
+                    container::Style {
+                        background: Some(
+                            cosmic::iced::Color::from_rgba(color.r, color.g, color.b, alpha)
+                                .into(),
+                        ),
+                        border: cosmic::iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..container::Style::default()
+                    }
+                } else {
+                    container::Style {
+                        background: Some(color.into()),
+                        border: cosmic::iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..container::Style::default()
+                    }
+                }
             });
 
-        let label_text = if self.error.is_some() {
+        let label_text = if self.refreshing {
+            // Spinning braille characters for a nice text spinner
+            const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let idx = ((self.spin_phase / std::f32::consts::TAU * SPINNER.len() as f32) as usize)
+                % SPINNER.len();
+            format!("{}", SPINNER[idx])
+        } else if self.error.is_some() {
             "ERR".to_string()
         } else if self.snapshot.is_some() {
             format!("{:.0}%", pct)
@@ -311,32 +348,58 @@ impl cosmic::Application for TokenTrkrApplet {
         let provider = self.provider.clone();
 
         struct UsagePoll;
-        Subscription::run_with_id(
+        let usage_sub = Subscription::run_with_id(
             std::any::TypeId::of::<UsagePoll>(),
             cosmic::iced::stream::channel(1, move |mut channel| async move {
                 let Some(provider) = provider else {
-                    // No provider, send error once and stop
                     _ = channel
                         .send(Message::UsageUpdate(Err(
                             "No provider configured".to_string(),
                         )))
                         .await;
-                    // Sleep forever
                     loop {
                         tokio::time::sleep(Duration::from_secs(86400)).await;
                     }
                 };
 
+                // Create the refresh channel and send the tx back
+                let (tx, mut rx) = mpsc::channel::<()>(4);
+                _ = channel.send(Message::SetRefreshChannel(tx)).await;
+
                 loop {
+                    _ = channel.send(Message::FetchStarted).await;
                     let result = match provider.fetch_usage().await {
                         Ok(snap) => Ok(snap),
                         Err(e) => Err(format!("{:#}", e)),
                     };
                     _ = channel.send(Message::UsageUpdate(result)).await;
-                    tokio::time::sleep(Duration::from_secs(poll_secs)).await;
+
+                    // Wait for either the poll interval or a manual refresh signal
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(poll_secs)) => {}
+                        _ = rx.recv() => {}
+                    }
                 }
             }),
-        )
+        );
+
+        let mut subs = vec![usage_sub];
+
+        // Spin animation tick — only active during refresh
+        if self.refreshing {
+            struct SpinTick;
+            subs.push(Subscription::run_with_id(
+                std::any::TypeId::of::<SpinTick>(),
+                cosmic::iced::stream::channel(1, move |mut channel| async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        _ = channel.send(Message::Tick).await;
+                    }
+                }),
+            ));
+        }
+
+        Subscription::batch(subs)
     }
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
@@ -352,15 +415,32 @@ impl cosmic::Application for TokenTrkrApplet {
                 );
                 self.snapshot = Some(snapshot);
                 self.error = None;
+                self.refreshing = false;
             }
             Message::UsageUpdate(Err(e)) => {
                 error!("Usage fetch failed: {}", e);
                 self.error = Some(e);
+                self.refreshing = false;
+            }
+            Message::FetchStarted => {
+                self.refreshing = true;
+                self.spin_phase = 0.0;
+            }
+            Message::Tick => {
+                // Advance spin animation — ~1 second full rotation
+                self.spin_phase += std::f32::consts::TAU / 20.0; // 20 ticks @ 20fps = 1s
+                if self.spin_phase > std::f32::consts::TAU {
+                    self.spin_phase -= std::f32::consts::TAU;
+                }
+            }
+            Message::SetRefreshChannel(tx) => {
+                self.refresh_tx = Some(tx);
             }
             Message::RefreshNow => {
-                // Trigger an immediate fetch by restarting subscription
-                // For now, just log — the subscription handles polling
                 info!("Manual refresh requested");
+                if let Some(ref tx) = self.refresh_tx {
+                    let _ = tx.try_send(());
+                }
             }
             Message::OpenDashboard => {
                 let _ = std::process::Command::new("xdg-open")
