@@ -117,14 +117,14 @@ impl ksni::Tray for TrkrTray {
         items.push(MenuItem::Separator);
 
         if let Some(ref snapshot) = self.snapshot {
-            // Rate windows — compact 2-line format
+            // Rate windows — 3-line format: label, bar + %, reset time
             for w in [&snapshot.primary, &snapshot.secondary, &snapshot.tertiary]
                 .into_iter()
                 .flatten()
             {
                 items.push(
                     StandardItem {
-                        label: w.format_summary(),
+                        label: w.label.clone(),
                         enabled: false,
                         ..Default::default()
                     }
@@ -132,7 +132,15 @@ impl ksni::Tray for TrkrTray {
                 );
                 items.push(
                     StandardItem {
-                        label: format!("  {}  {}", w.format_bar(12), w.format_reset_time()),
+                        label: format!("  {}  {:.0}%", w.format_bar(12), w.used_percent),
+                        enabled: false,
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+                items.push(
+                    StandardItem {
+                        label: format!("  {}", w.format_reset_time()),
                         enabled: false,
                         ..Default::default()
                     }

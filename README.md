@@ -13,14 +13,20 @@ Click the tray icon to see:
 ```
 TokenTrkr — Max Plan
 ─────────────────
-Session (5h)         67% used
-  ▓▓▓▓▓▓▓▓░░░░  Resets in 2h 15m
+Session (5h)
+  ▓▓░░░░░░░░░░  13%
+  Resets in 3h 57m
 ─────────────────
-Weekly (7d)          42% used
-  ▓▓▓▓▓░░░░░░░  Resets Mar 8, 12:00 AM
+Weekly (7d)
+  ▓▓░░░░░░░░░░  18%
+  Resets Mar 7, 9:00 PM
 ─────────────────
-Extra Usage          $12.50 / $100.00
-  ▓▓░░░░░░░░░░
+Sonnet (7d)
+  ░░░░░░░░░░░░  1%
+  Resets Mar 8, 2:00 AM
+─────────────────
+Extra Usage     $0.00 / $60.00
+  ░░░░░░░░░░░░
 ─────────────────
 Updated just now
 ─────────────────
