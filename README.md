@@ -6,7 +6,7 @@ System tray app that tracks your Claude token usage on Linux. Works as a **nativ
 
 ### COSMIC Panel Applet
 
-![COSMIC Applet](assets/COSMIC_TokenTrkr.png)
+![COSMIC Applet](assets/COSMIC_TokenTrkr_view.png)
 
 ## What it does
 
