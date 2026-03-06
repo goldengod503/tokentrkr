@@ -11,18 +11,18 @@ TokenTrkr reads your Claude OAuth credentials, polls the usage API, and shows yo
 Click the tray icon to see:
 
 ```
-TokenTrkr
+TokenTrkr — Max Plan
 ─────────────────
-Session (5h)
-  [████████░░░░] 67% used
-  Resets in 2h 15m
+Session (5h)         67% used
+  ▓▓▓▓▓▓▓▓░░░░  Resets in 2h 15m
 ─────────────────
-Weekly (7d)
-  [██████░░░░░░] 42% used
-  Resets Mar 8, 12:00 AM
+Weekly (7d)          42% used
+  ▓▓▓▓▓░░░░░░░  Resets Mar 8, 12:00 AM
 ─────────────────
-Plan: claude_max_5x
-Updated: 2 min ago
+Extra Usage          $12.50 / $100.00
+  ▓▓░░░░░░░░░░
+─────────────────
+Updated just now
 ─────────────────
 Refresh Now
 Open Dashboard
