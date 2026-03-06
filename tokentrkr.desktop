@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TokenTrkr
+Comment=Track Claude token usage in the system tray
+Exec=tokentrkr
+Icon=dialog-information
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
