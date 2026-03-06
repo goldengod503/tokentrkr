@@ -1,8 +1,12 @@
 # TokenTrkr
 
-System tray app that tracks your Claude token usage and displays it in the Pop!_OS/COSMIC top bar.
+System tray app that tracks your Claude token usage on Linux. Works as a **native COSMIC panel applet** on Pop!_OS/COSMIC, or as a **StatusNotifierItem tray icon** on KDE, GNOME, and other DEs.
 
 ![Rust](https://img.shields.io/badge/rust-stable-orange) ![Platform](https://img.shields.io/badge/platform-linux-blue)
+
+### COSMIC Panel Applet
+
+![COSMIC Applet](assets/COSMIC_TokenTrkr.png)
 
 ## What it does
 
@@ -43,11 +47,13 @@ Quit
 
 ## Requirements
 
-- Linux with StatusNotifierItem support (COSMIC, KDE Plasma, GNOME with AppIndicator extension)
+- Linux (COSMIC, KDE Plasma, GNOME with AppIndicator extension, or any DE with SNI support)
 - Claude CLI installed and authenticated (`~/.claude/.credentials.json` must exist)
 - Rust toolchain (to build)
 
 ## Install
+
+### SNI Tray (all Linux DEs)
 
 ```bash
 git clone https://github.com/goldengod503/tokentrkr.git
@@ -57,7 +63,32 @@ cargo build --release
 
 The binary is at `target/release/tokentrkr`.
 
-### Autostart
+### COSMIC Panel Applet (Pop!_OS / COSMIC)
+
+Build with the `cosmic` feature for a native panel applet with popup UI:
+
+```bash
+cargo build --release --features cosmic
+```
+
+Install the applet:
+
+```bash
+# Put the binary in PATH
+sudo cp target/release/tokentrkr /usr/bin/
+
+# Install the desktop entry for COSMIC panel discovery
+sudo cp resources/com.github.goldengod503.TokenTrkr.desktop /usr/share/applications/
+
+# Restart the panel to pick up the new applet
+pkill cosmic-panel
+```
+
+Then add **TokenTrkr** to your panel via COSMIC Settings > Desktop > Panel > Applets.
+
+The app auto-detects which desktop you're running — on COSMIC it launches the native applet, elsewhere it falls back to the SNI tray icon.
+
+### Autostart (SNI mode)
 
 Copy the desktop file to your autostart directory:
 
