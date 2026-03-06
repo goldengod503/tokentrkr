@@ -30,7 +30,12 @@ pub struct TokenTrkrApplet {
     refreshing: bool,
     spin_phase: f32,
     refresh_tx: Option<mpsc::Sender<()>>,
+    fetch_done: bool,       // true once result arrived, waiting for animation to finish
+    pending_snapshot: Option<Result<UsageSnapshot, String>>, // held until animation completes
 }
+
+const MIN_SPIN_CYCLES: f32 = 2.0; // minimum full rotations before stopping
+const MIN_SPIN_PHASE: f32 = MIN_SPIN_CYCLES * std::f32::consts::TAU;
 
 impl Default for TokenTrkrApplet {
     fn default() -> Self {
@@ -44,6 +49,8 @@ impl Default for TokenTrkrApplet {
             refreshing: false,
             spin_phase: 0.0,
             refresh_tx: None,
+            fetch_done: false,
+            pending_snapshot: None,
         }
     }
 }
@@ -106,6 +113,29 @@ fn progress_bar_fill(color: cosmic::iced::Color) -> impl Fn(&Theme) -> container
             ..Default::default()
         },
         ..container::Style::default()
+    }
+}
+
+impl TokenTrkrApplet {
+    fn apply_usage_result(&mut self, result: Result<UsageSnapshot, String>) {
+        match result {
+            Ok(snapshot) => {
+                info!(
+                    "Usage updated: session={:.0}%",
+                    snapshot
+                        .primary
+                        .as_ref()
+                        .map(|w| w.used_percent)
+                        .unwrap_or(0.0)
+                );
+                self.snapshot = Some(snapshot);
+                self.error = None;
+            }
+            Err(e) => {
+                error!("Usage fetch failed: {}", e);
+                self.error = Some(e);
+            }
+        }
     }
 }
 
@@ -404,33 +434,36 @@ impl cosmic::Application for TokenTrkrApplet {
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
-            Message::UsageUpdate(Ok(snapshot)) => {
-                info!(
-                    "Usage updated: session={:.0}%",
-                    snapshot
-                        .primary
-                        .as_ref()
-                        .map(|w| w.used_percent)
-                        .unwrap_or(0.0)
-                );
-                self.snapshot = Some(snapshot);
-                self.error = None;
-                self.refreshing = false;
-            }
-            Message::UsageUpdate(Err(e)) => {
-                error!("Usage fetch failed: {}", e);
-                self.error = Some(e);
-                self.refreshing = false;
+            Message::UsageUpdate(result) => {
+                // Don't apply immediately — wait for animation to finish minimum cycles
+                if self.refreshing && self.spin_phase < MIN_SPIN_PHASE {
+                    self.fetch_done = true;
+                    self.pending_snapshot = Some(result);
+                } else {
+                    self.apply_usage_result(result);
+                    self.refreshing = false;
+                    self.fetch_done = false;
+                }
             }
             Message::FetchStarted => {
                 self.refreshing = true;
                 self.spin_phase = 0.0;
             }
             Message::Tick => {
-                // Advance spin animation — ~1 second full rotation
+                let prev = self.spin_phase;
                 self.spin_phase += std::f32::consts::TAU / 20.0; // 20 ticks @ 20fps = 1s
-                if self.spin_phase > std::f32::consts::TAU {
-                    self.spin_phase -= std::f32::consts::TAU;
+
+                // Stop at a clean cycle boundary: past minimum AND just crossed a full rotation
+                if self.fetch_done && self.spin_phase >= MIN_SPIN_PHASE {
+                    let prev_cycle = (prev / std::f32::consts::TAU) as u32;
+                    let curr_cycle = (self.spin_phase / std::f32::consts::TAU) as u32;
+                    if curr_cycle > prev_cycle {
+                        if let Some(result) = self.pending_snapshot.take() {
+                            self.apply_usage_result(result);
+                        }
+                        self.refreshing = false;
+                        self.fetch_done = false;
+                    }
                 }
             }
             Message::SetRefreshChannel(tx) => {
