@@ -6,6 +6,7 @@ mod provider;
 mod icon;
 mod tray;
 
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -17,6 +18,18 @@ use ksni::TrayMethods;
 use polling::{run_poll_loop, PollCommand};
 use provider::Provider;
 use tray::TrkrTray;
+
+/// Sentinel error for 429 responses so the polling loop can retry with backoff.
+#[derive(Debug)]
+pub struct RateLimited;
+
+impl fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Rate limited (429)")
+    }
+}
+
+impl std::error::Error for RateLimited {}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

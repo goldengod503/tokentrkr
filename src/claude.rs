@@ -132,9 +132,12 @@ impl ClaudeProvider {
             .await
             .context("Failed to send usage API request")?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                bail!(crate::RateLimited);
+            }
             bail!("Usage API request failed ({}): {}", status, body);
         }
 

@@ -2,7 +2,7 @@
 Type=Application
 Name=TokenTrkr
 Comment=Track Claude token usage in the system tray
-Exec=tokentrkr
+Exec=/media/peter/Data/dev/tokentrkr/target/release/tokentrkr
 Icon=dialog-information
 Terminal=false
 Categories=Utility;
