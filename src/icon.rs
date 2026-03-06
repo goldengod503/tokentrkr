@@ -1,9 +1,9 @@
 use ksni::Icon;
 
-const SIZE: i32 = 24;
-const CENTER: f64 = 11.5; // (SIZE-1)/2
-const OUTER_R: f64 = 11.0;
-const INNER_R: f64 = 8.0;
+const SIZE: i32 = 48;
+const CENTER: f64 = 23.5; // (SIZE-1)/2
+const OUTER_R: f64 = 22.0;
+const INNER_R: f64 = 16.0;
 
 
 /// Build a 24x24 tray icon: circular gauge ring that fills based on usage percent,
@@ -117,12 +117,11 @@ fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
     (a as f64 + (b as f64 - a as f64) * t).round() as u8
 }
 
-/// Define a chunky "T" glyph in the center of the 24x24 icon.
-/// Manually placed pixels for a crisp look at small size.
+/// Define a chunky "T" glyph in the center of the 48x48 icon.
 fn is_t_glyph(x: i32, y: i32) -> bool {
-    // Horizontal bar of T: y=7..9, x=8..16
-    let h_bar = y >= 7 && y <= 8 && x >= 8 && x <= 15;
-    // Vertical stem of T: y=9..17, x=10..13
-    let v_stem = y >= 9 && y <= 16 && x >= 10 && x <= 13;
+    // Horizontal bar of T: y=14..17, x=16..31
+    let h_bar = y >= 14 && y <= 17 && x >= 16 && x <= 31;
+    // Vertical stem of T: y=18..33, x=21..26
+    let v_stem = y >= 18 && y <= 33 && x >= 21 && x <= 26;
     h_bar || v_stem
 }

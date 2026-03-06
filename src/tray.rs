@@ -2,7 +2,6 @@ use chrono::Utc;
 use ksni;
 use ksni::menu::{StandardItem, MenuItem};
 use tokio::sync::mpsc;
-use tracing::debug;
 
 use crate::icon::build_icon;
 use crate::models::UsageSnapshot;
@@ -23,10 +22,34 @@ impl TrkrTray {
         }
     }
 
+    fn format_plan_name(raw: &str) -> String {
+        let lower = raw.to_lowercase();
+        if lower.contains("max") {
+            "Max Plan".to_string()
+        } else if lower.contains("pro") {
+            "Pro Plan".to_string()
+        } else if lower.contains("team") {
+            "Team Plan".to_string()
+        } else {
+            let mut c = raw.chars();
+            match c.next() {
+                None => raw.to_string(),
+                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+            }
+        }
+    }
+
     fn tooltip_text(&self) -> String {
         if let Some(ref s) = self.snapshot {
+            let mut parts = Vec::new();
             if let Some(ref p) = s.primary {
-                return format!("Session: {:.0}% used", p.used_percent);
+                parts.push(format!("Session: {:.0}%", p.used_percent));
+            }
+            if let Some(ref w) = s.secondary {
+                parts.push(format!("Weekly: {:.0}%", w.used_percent));
+            }
+            if !parts.is_empty() {
+                return parts.join(" · ");
             }
         }
         if let Some(ref e) = self.error {
@@ -68,10 +91,23 @@ impl ksni::Tray for TrkrTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items: Vec<MenuItem<Self>> = Vec::new();
 
-        // Title
+        // Title with plan name
+        let title = if let Some(ref snap) = self.snapshot {
+            if let Some(ref id) = snap.identity {
+                if let Some(ref plan) = id.plan {
+                    format!("TokenTrkr — {}", Self::format_plan_name(plan))
+                } else {
+                    "TokenTrkr".to_string()
+                }
+            } else {
+                "TokenTrkr".to_string()
+            }
+        } else {
+            "TokenTrkr".to_string()
+        };
         items.push(
             StandardItem {
-                label: "TokenTrkr".to_string(),
+                label: title,
                 enabled: false,
                 ..Default::default()
             }
@@ -81,11 +117,14 @@ impl ksni::Tray for TrkrTray {
         items.push(MenuItem::Separator);
 
         if let Some(ref snapshot) = self.snapshot {
-            // Primary (Session/5h)
-            if let Some(ref w) = snapshot.primary {
+            // Rate windows — compact 2-line format
+            for w in [&snapshot.primary, &snapshot.secondary, &snapshot.tertiary]
+                .into_iter()
+                .flatten()
+            {
                 items.push(
                     StandardItem {
-                        label: w.label.clone(),
+                        label: w.format_summary(),
                         enabled: false,
                         ..Default::default()
                     }
@@ -93,73 +132,7 @@ impl ksni::Tray for TrkrTray {
                 );
                 items.push(
                     StandardItem {
-                        label: format!("  {}", w.format_bar(12)),
-                        enabled: false,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                items.push(
-                    StandardItem {
-                        label: format!("  {}", w.format_reset_time()),
-                        enabled: false,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                items.push(MenuItem::Separator);
-            }
-
-            // Secondary (Weekly/7d)
-            if let Some(ref w) = snapshot.secondary {
-                items.push(
-                    StandardItem {
-                        label: w.label.clone(),
-                        enabled: false,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                items.push(
-                    StandardItem {
-                        label: format!("  {}", w.format_bar(12)),
-                        enabled: false,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                items.push(
-                    StandardItem {
-                        label: format!("  {}", w.format_reset_time()),
-                        enabled: false,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                items.push(MenuItem::Separator);
-            }
-
-            // Tertiary (Sonnet/7d)
-            if let Some(ref w) = snapshot.tertiary {
-                items.push(
-                    StandardItem {
-                        label: w.label.clone(),
-                        enabled: false,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                items.push(
-                    StandardItem {
-                        label: format!("  {}", w.format_bar(12)),
-                        enabled: false,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                items.push(
-                    StandardItem {
-                        label: format!("  {}", w.format_reset_time()),
+                        label: format!("  {}  {}", w.format_bar(12), w.format_reset_time()),
                         enabled: false,
                         ..Default::default()
                     }
@@ -170,13 +143,25 @@ impl ksni::Tray for TrkrTray {
 
             // Extra usage
             if let Some(ref extra) = snapshot.extra_usage {
-                if extra.is_enabled {
+                if extra.is_enabled && extra.monthly_limit > 0.0 {
+                    let pct = (extra.used_credits / extra.monthly_limit * 100.0).min(100.0);
+                    let filled = ((pct / 100.0) * 12.0).round() as usize;
+                    let bar: String = "▓".repeat(filled.min(12))
+                        + &"░".repeat(12 - filled.min(12));
                     items.push(
                         StandardItem {
                             label: format!(
-                                "Extra: ${:.2} / ${:.2} {}",
-                                extra.used_credits, extra.monthly_limit, extra.currency
+                                "Extra Usage          ${:.2} / ${:.2}",
+                                extra.used_credits, extra.monthly_limit
                             ),
+                            enabled: false,
+                            ..Default::default()
+                        }
+                        .into(),
+                    );
+                    items.push(
+                        StandardItem {
+                            label: format!("  {}", bar),
                             enabled: false,
                             ..Default::default()
                         }
@@ -186,22 +171,12 @@ impl ksni::Tray for TrkrTray {
                 }
             }
 
-            // Account info
+            // Footer: account + updated time
             if let Some(ref identity) = snapshot.identity {
                 if let Some(ref email) = identity.email {
                     items.push(
                         StandardItem {
-                            label: format!("Account: {}", email),
-                            enabled: false,
-                            ..Default::default()
-                        }
-                        .into(),
-                    );
-                }
-                if let Some(ref plan) = identity.plan {
-                    items.push(
-                        StandardItem {
-                            label: format!("Plan: {}", plan),
+                            label: email.clone(),
                             enabled: false,
                             ..Default::default()
                         }
@@ -210,14 +185,13 @@ impl ksni::Tray for TrkrTray {
                 }
             }
 
-            // Updated time
             let ago = Utc::now()
                 .signed_duration_since(snapshot.updated_at)
                 .num_seconds();
             let updated_text = if ago < 60 {
-                "Updated: just now".to_string()
+                "Updated just now".to_string()
             } else {
-                format!("Updated: {} min ago", ago / 60)
+                format!("Updated {} min ago", ago / 60)
             };
             items.push(
                 StandardItem {
@@ -249,21 +223,18 @@ impl ksni::Tray for TrkrTray {
 
         items.push(MenuItem::Separator);
 
-        // Refresh Now
+        // Actions
         let cmd_tx = self.cmd_tx.clone();
         items.push(
             StandardItem {
                 label: "Refresh Now".to_string(),
                 activate: Box::new(move |_tray: &mut Self| {
-                    debug!("Refresh requested from menu");
                     let _ = cmd_tx.try_send(PollCommand::RefreshNow);
                 }),
                 ..Default::default()
             }
             .into(),
         );
-
-        // Open Dashboard
         items.push(
             StandardItem {
                 label: "Open Dashboard".to_string(),
@@ -276,8 +247,6 @@ impl ksni::Tray for TrkrTray {
             }
             .into(),
         );
-
-        // Quit
         items.push(
             StandardItem {
                 label: "Quit".to_string(),

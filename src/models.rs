@@ -16,6 +16,7 @@ pub struct ExtraUsage {
     pub is_enabled: bool,
     pub monthly_limit: f64,
     pub used_credits: f64,
+    #[allow(dead_code)]
     pub currency: String,
 }
 
@@ -121,7 +122,12 @@ impl RateWindow {
         let filled = ((self.used_percent / 100.0) * width as f64).round() as usize;
         let filled = filled.min(width);
         let empty = width - filled;
-        let bar: String = "█".repeat(filled) + &"░".repeat(empty);
-        format!("[{}] {:.0}% used", bar, self.used_percent)
+        let bar: String = "▓".repeat(filled) + &"░".repeat(empty);
+        bar
     }
+
+    pub fn format_summary(&self) -> String {
+        format!("{:<20} {:.0}% used", self.label, self.used_percent)
+    }
+
 }
