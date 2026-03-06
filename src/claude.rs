@@ -154,7 +154,7 @@ fn parse_reset_time(s: &str) -> Option<DateTime<Utc>> {
 fn window_from_response(resp: &WindowResponse, label: &str, window_minutes: Option<u32>) -> RateWindow {
     RateWindow {
         label: label.to_string(),
-        used_percent: resp.utilization * 100.0,
+        used_percent: resp.utilization,
         window_minutes,
         resets_at: resp.resets_at.as_deref().and_then(parse_reset_time),
         reset_description: None,
