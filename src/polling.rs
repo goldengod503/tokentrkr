@@ -3,6 +3,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+/// Overall timeout for a single fetch attempt (including retries for 429s).
+const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+
 use crate::provider::Provider;
 use crate::tray::TrkrTray;
 use crate::RateLimited;
@@ -32,8 +35,18 @@ pub async fn run_poll_loop(
     interval.tick().await;
 
     loop {
-        // Do a fetch, with retry on 429
-        do_fetch_with_retry(&provider, &tray_handle).await;
+        // Do a fetch, with retry on 429 (with overall timeout so we never block forever)
+        match tokio::time::timeout(FETCH_TIMEOUT, do_fetch_with_retry(&provider, &tray_handle)).await {
+            Ok(()) => {}
+            Err(_) => {
+                error!("Fetch timed out after {}s", FETCH_TIMEOUT.as_secs());
+                tray_handle
+                    .update(|tray| {
+                        tray.error = Some("Fetch timed out".to_string());
+                    })
+                    .await;
+            }
+        }
 
         // Wait for next tick or command
         tokio::select! {

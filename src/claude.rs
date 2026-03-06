@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::models::*;
@@ -21,7 +21,11 @@ pub struct ClaudeProvider {
 impl ClaudeProvider {
     pub fn new(config: &Config) -> Result<Self> {
         let credentials_path = config.credentials_path();
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("Failed to build HTTP client")?;
 
         Ok(Self {
             credentials_path,
@@ -134,8 +138,12 @@ impl ClaudeProvider {
 
         let status = resp.status();
         if !status.is_success() {
+            let retry_after = resp.headers().get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
             let body = resp.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                warn!("429 response — retry-after: {:?}, body: {}", retry_after, body);
                 bail!(crate::RateLimited);
             }
             bail!("Usage API request failed ({}): {}", status, body);
@@ -169,7 +177,19 @@ impl Provider for ClaudeProvider {
 
     async fn fetch_usage(&self) -> Result<UsageSnapshot> {
         let creds = self.get_valid_credentials().await?;
-        let api_resp = self.fetch_usage_api(&creds.access_token).await?;
+        let api_resp = match self.fetch_usage_api(&creds.access_token).await {
+            Ok(resp) => resp,
+            Err(e) if e.downcast_ref::<crate::RateLimited>().is_some() => {
+                // 429 often means a stale token (Claude Code may have refreshed
+                // credentials on disk, invalidating our copy). Re-read from disk
+                // and force a token refresh before propagating.
+                info!("Got 429, re-reading credentials and refreshing token");
+                let disk_creds = self.read_credentials()?;
+                let fresh = self.refresh_token(&disk_creds).await?;
+                self.fetch_usage_api(&fresh.access_token).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         debug!("Usage API response received");
 
