@@ -6,7 +6,13 @@ System tray app that tracks your Claude token usage and displays it in the Pop!_
 
 ## What it does
 
-TokenTrkr reads your Claude OAuth credentials, polls the usage API, and shows your current utilization as a circular gauge icon in the system tray. The icon color shifts from **teal → amber → red** as usage increases.
+TokenTrkr reads your Claude OAuth credentials, polls the usage API, and shows your current session usage as a bold number on a color-coded circle in the system tray. The icon color changes by usage bucket:
+
+- **0–25%** → Teal
+- **26–50%** → Amber
+- **51–75%** → Orange
+- **76–90%** → Red
+- **91–100%** → Dark Red
 
 Click the tray icon to see:
 
@@ -83,7 +89,7 @@ show_tertiary = true      # show Sonnet usage window
 1. Reads OAuth tokens from `~/.claude/.credentials.json` (written by Claude CLI)
 2. Refreshes the access token if expired
 3. Calls the Claude usage API to get session (5h), weekly (7d), and Sonnet utilization
-4. Renders a dynamic tray icon — circular gauge with a "T" glyph, color-coded by usage level
+4. Renders a 256x256 tray icon — usage percentage number on a color-coded circle (rendered with DejaVu Sans Bold via ab_glyph)
 5. Repeats on a configurable interval
 
 ## License
