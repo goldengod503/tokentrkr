@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=TokenTrkr
+Comment=Claude token usage tracker for the COSMIC desktop
+Type=Application
+Icon=com.github.goldengod503.TokenTrkr
+Exec=tokentrkr %F
+Terminal=false
+StartupNotify=true
+Categories=COSMIC
+Keywords=COSMIC;claude;tokens;usage
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+MimeType=

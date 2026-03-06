@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "TokenTrkr — system tray app for tracking Claude token usage on Pop!_OS/COSMIC"
 
+[features]
+default = []
+cosmic = ["dep:libcosmic", "dep:futures-util"]
+
 [dependencies]
 ksni = "0.3"
 tokio = { version = "1", features = ["full"] }
@@ -19,3 +23,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 ab_glyph = "0.2"
 async-trait = "0.1"
+futures-util = { version = "0.3", optional = true }
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+rev = "a37be90e811f365273bf632bf7090b63a368f092"
+features = ["applet", "tokio", "wayland", "winit"]
+optional = true
