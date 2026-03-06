@@ -268,7 +268,9 @@ impl ksni::Tray for TrkrTray {
             StandardItem {
                 label: "Open Dashboard".to_string(),
                 activate: Box::new(|_tray: &mut Self| {
-                    let _ = open::that("https://claude.ai/settings/usage");
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg("https://claude.ai/settings/usage")
+                        .spawn();
                 }),
                 ..Default::default()
             }
@@ -276,12 +278,11 @@ impl ksni::Tray for TrkrTray {
         );
 
         // Quit
-        let cmd_tx = self.cmd_tx.clone();
         items.push(
             StandardItem {
                 label: "Quit".to_string(),
                 activate: Box::new(move |_tray: &mut Self| {
-                    let _ = cmd_tx.try_send(PollCommand::Quit);
+                    std::process::exit(0);
                 }),
                 ..Default::default()
             }

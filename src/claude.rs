@@ -190,8 +190,8 @@ impl Provider for ClaudeProvider {
 
         let extra = api_resp.extra_usage.as_ref().map(|e| ExtraUsage {
             is_enabled: e.is_enabled,
-            monthly_limit: e.monthly_limit.unwrap_or(0.0),
-            used_credits: e.used_credits.unwrap_or(0.0),
+            monthly_limit: e.monthly_limit.unwrap_or(0.0) / 100.0,
+            used_credits: e.used_credits.unwrap_or(0.0) / 100.0,
             currency: e.currency.clone().unwrap_or_else(|| "USD".to_string()),
         });
 
