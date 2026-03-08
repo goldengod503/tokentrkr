@@ -1,5 +1,6 @@
 mod claude;
 mod config;
+mod history;
 mod models;
 mod polling;
 mod provider;

@@ -25,6 +25,7 @@ pub struct UsageSnapshot {
     pub primary: Option<RateWindow>,
     pub secondary: Option<RateWindow>,
     pub tertiary: Option<RateWindow>,
+    pub model_windows: Vec<RateWindow>,
     pub extra_usage: Option<ExtraUsage>,
     pub updated_at: DateTime<Utc>,
     pub identity: Option<AccountIdentity>,
@@ -44,7 +45,10 @@ pub struct AccountIdentity {
 pub struct UsageApiResponse {
     pub five_hour: Option<WindowResponse>,
     pub seven_day: Option<WindowResponse>,
+    pub seven_day_opus: Option<WindowResponse>,
     pub seven_day_sonnet: Option<WindowResponse>,
+    pub seven_day_cowork: Option<WindowResponse>,
+    pub seven_day_oauth_apps: Option<WindowResponse>,
     pub extra_usage: Option<ExtraUsageResponse>,
 }
 

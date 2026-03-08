@@ -8,7 +8,7 @@ System tray app that tracks your Claude token usage on Linux. Works as a **nativ
 
 ![COSMIC Applet](assets/COSMIC_TokenTrkr_view.png)
 
-Features a color-coded dot + percentage in the panel, click-to-open popup with progress bars, and a spinning refresh indicator when fetching usage data.
+Features a color-coded dot + percentage in the panel, click-to-open popup with progress bars, usage history chart, and a spinning refresh indicator when fetching usage data.
 
 ## What it does
 
@@ -22,6 +22,14 @@ TokenTrkr reads your Claude OAuth credentials, polls the usage API, and shows yo
 
 Click the tray icon to see:
 
+**COSMIC applet popup:**
+- Session (5h) and Opus (7d) progress bars with reset timers
+- Per-model breakdown (Sonnet, Opus, Cowork — shown when API returns data)
+- Extra usage billing tracker
+- Usage history line chart with selectable time ranges (1h / 6h / 1d / 7d / 30d)
+- Refresh and Dashboard buttons
+
+**SNI tray menu (KDE, GNOME, etc.):**
 ```
 TokenTrkr — Max Plan
 ─────────────────
@@ -29,13 +37,12 @@ Session (5h)
   ▓▓░░░░░░░░░░  13%
   Resets in 3h 57m
 ─────────────────
-Weekly (7d)
+Opus (7d)
   ▓▓░░░░░░░░░░  18%
   Resets Mar 7, 9:00 PM
 ─────────────────
-Sonnet (7d)
-  ░░░░░░░░░░░░  1%
-  Resets Mar 8, 2:00 AM
+Per-Model Usage
+  Sonnet (7d) ░░░░░░░░  1%
 ─────────────────
 Extra Usage     $0.00 / $60.00
   ░░░░░░░░░░░░
@@ -117,13 +124,25 @@ show_percent = "used"     # "used" or "remaining"
 show_tertiary = true      # show Sonnet usage window
 ```
 
+## Feature comparison
+
+| Feature | COSMIC Applet | SNI Tray |
+|---|---|---|
+| Status bar indicator | Color dot + percentage | Color-coded icon |
+| Session & weekly usage | Progress bars | Text + block bars |
+| Per-model breakdown | Progress bars | Text + block bars |
+| Extra usage tracking | Progress bar | Text + block bar |
+| Usage history chart | Line chart (canvas) | — |
+| Time range selector | 1h / 6h / 1d / 7d / 30d | — |
+
 ## How it works
 
 1. Reads OAuth tokens from `~/.claude/.credentials.json` (written by Claude CLI)
 2. Refreshes the access token if expired
-3. Calls the Claude usage API to get session (5h), weekly (7d), and Sonnet utilization
-4. Renders a 256x256 tray icon — usage percentage number on a color-coded circle (rendered with DejaVu Sans Bold via ab_glyph)
-5. Repeats on a configurable interval
+3. Calls the Claude usage API to get session (5h), Opus (7d), and per-model utilization (Sonnet, Cowork, etc.)
+4. Records usage history to `~/.config/tokentrkr/history.json` (30-day retention)
+5. Renders a 256x256 tray icon — usage percentage number on a color-coded circle (rendered with DejaVu Sans Bold via ab_glyph)
+6. Repeats on a configurable interval
 
 ## License
 

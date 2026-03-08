@@ -201,12 +201,22 @@ impl Provider for ClaudeProvider {
         let secondary = api_resp
             .seven_day
             .as_ref()
-            .map(|w| window_from_response(w, "Weekly (7d)", Some(10080)));
+            .map(|w| window_from_response(w, "Opus (7d)", Some(10080)));
 
-        let tertiary = api_resp
-            .seven_day_sonnet
-            .as_ref()
-            .map(|w| window_from_response(w, "Sonnet (7d)", Some(10080)));
+        let tertiary = None;
+
+        let mut model_windows = Vec::new();
+        let model_fields: &[(&Option<WindowResponse>, &str)] = &[
+            (&api_resp.seven_day_sonnet, "Sonnet (7d)"),
+            (&api_resp.seven_day_opus, "Opus Extra (7d)"),
+            (&api_resp.seven_day_cowork, "Cowork (7d)"),
+            (&api_resp.seven_day_oauth_apps, "OAuth Apps (7d)"),
+        ];
+        for (field, label) in model_fields {
+            if let Some(w) = field {
+                model_windows.push(window_from_response(w, label, Some(10080)));
+            }
+        }
 
         let extra = api_resp.extra_usage.as_ref().map(|e| ExtraUsage {
             is_enabled: e.is_enabled,
@@ -233,6 +243,7 @@ impl Provider for ClaudeProvider {
             primary,
             secondary,
             tertiary,
+            model_windows,
             extra_usage: extra,
             updated_at: Utc::now(),
             identity: Some(identity),

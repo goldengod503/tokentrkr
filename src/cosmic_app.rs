@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use cosmic::iced::{window::Id, Alignment, Length, Limits, Subscription};
+use cosmic::iced::widget::canvas::{self, Path, Stroke};
+use cosmic::iced::{mouse, window::Id, Alignment, Length, Limits, Subscription};
 use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
 use cosmic::prelude::*;
 use cosmic::widget::{self, container};
@@ -12,6 +13,7 @@ use tracing::{error, info};
 
 use crate::claude::ClaudeProvider;
 use crate::config::Config;
+use crate::history::{TimeRange, UsageDataPoint, UsageHistory};
 use crate::models::UsageSnapshot;
 use crate::provider::Provider;
 
@@ -30,11 +32,13 @@ pub struct TokenTrkrApplet {
     refreshing: bool,
     spin_phase: f32,
     refresh_tx: Option<mpsc::Sender<()>>,
-    fetch_done: bool,       // true once result arrived, waiting for animation to finish
-    pending_snapshot: Option<Result<UsageSnapshot, String>>, // held until animation completes
+    fetch_done: bool,
+    pending_snapshot: Option<Result<UsageSnapshot, String>>,
+    history: UsageHistory,
+    selected_range: TimeRange,
 }
 
-const MIN_SPIN_CYCLES: f32 = 2.0; // minimum full rotations before stopping
+const MIN_SPIN_CYCLES: f32 = 3.0;
 const MIN_SPIN_PHASE: f32 = MIN_SPIN_CYCLES * std::f32::consts::TAU;
 
 impl Default for TokenTrkrApplet {
@@ -51,6 +55,8 @@ impl Default for TokenTrkrApplet {
             refresh_tx: None,
             fetch_done: false,
             pending_snapshot: None,
+            history: UsageHistory::default(),
+            selected_range: TimeRange::Day1,
         }
     }
 }
@@ -65,6 +71,7 @@ pub enum Message {
     Tick,
     FetchStarted,
     SetRefreshChannel(mpsc::Sender<()>),
+    SelectTimeRange(TimeRange),
 }
 
 fn bucket_color(pct: f64) -> cosmic::iced::Color {
@@ -116,18 +123,167 @@ fn progress_bar_fill(color: cosmic::iced::Color) -> impl Fn(&Theme) -> container
     }
 }
 
+// Chart colors
+const COLOR_5H: cosmic::iced::Color = cosmic::iced::Color {
+    r: 0.235,
+    g: 0.533,
+    b: 0.988,
+    a: 1.0,
+};
+const COLOR_7D: cosmic::iced::Color = cosmic::iced::Color {
+    r: 0.961,
+    g: 0.620,
+    b: 0.043,
+    a: 1.0,
+};
+
+struct UsageChart {
+    points: Vec<UsageDataPoint>,
+    range: TimeRange,
+}
+
+impl canvas::Program<Message, Theme> for UsageChart {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &cosmic::Renderer,
+        _theme: &Theme,
+        bounds: cosmic::iced::Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry<cosmic::Renderer>> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let w = bounds.width;
+        let h = bounds.height;
+        let padding_left = 30.0_f32;
+        let padding_right = 8.0_f32;
+        let padding_top = 4.0_f32;
+        let padding_bottom = 16.0_f32;
+        let chart_w = w - padding_left - padding_right;
+        let chart_h = h - padding_top - padding_bottom;
+
+        // Grid lines and Y-axis labels
+        let grid_color = cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.1);
+        let label_color = cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.4);
+        for &pct in &[0, 25, 50, 75, 100] {
+            let y = padding_top + chart_h * (1.0 - pct as f32 / 100.0);
+            frame.stroke(
+                &Path::line(
+                    cosmic::iced::Point::new(padding_left, y),
+                    cosmic::iced::Point::new(w - padding_right, y),
+                ),
+                Stroke::default()
+                    .with_color(grid_color)
+                    .with_width(1.0),
+            );
+            frame.fill_text(canvas::Text {
+                content: format!("{}%", pct),
+                position: cosmic::iced::Point::new(0.0, y - 5.0),
+                color: label_color,
+                size: cosmic::iced::Pixels(9.0),
+                ..canvas::Text::default()
+            });
+        }
+
+        if self.points.len() < 2 {
+            // "No data" message
+            frame.fill_text(canvas::Text {
+                content: "No history data yet".to_string(),
+                position: cosmic::iced::Point::new(w / 2.0 - 40.0, h / 2.0 - 5.0),
+                color: label_color,
+                size: cosmic::iced::Pixels(11.0),
+                ..canvas::Text::default()
+            });
+            return vec![frame.into_geometry()];
+        }
+
+        let now = chrono::Utc::now();
+        let range_start = now - chrono::Duration::seconds(self.range.seconds());
+        let total_secs = self.range.seconds() as f32;
+
+        let to_x = |ts: chrono::DateTime<chrono::Utc>| -> f32 {
+            let offset = ts.signed_duration_since(range_start).num_seconds() as f32;
+            padding_left + (offset / total_secs).clamp(0.0, 1.0) * chart_w
+        };
+        let to_y = |pct: f64| -> f32 {
+            padding_top + chart_h * (1.0 - (pct / 100.0).clamp(0.0, 1.0) as f32)
+        };
+
+        // Draw 5h line
+        let path_5h = Path::new(|builder| {
+            for (i, p) in self.points.iter().enumerate() {
+                let x = to_x(p.timestamp);
+                let y = to_y(p.pct_5h);
+                if i == 0 {
+                    builder.move_to(cosmic::iced::Point::new(x, y));
+                } else {
+                    builder.line_to(cosmic::iced::Point::new(x, y));
+                }
+            }
+        });
+        frame.stroke(
+            &path_5h,
+            Stroke::default().with_color(COLOR_5H).with_width(1.5),
+        );
+
+        // Draw 7d line
+        let path_7d = Path::new(|builder| {
+            for (i, p) in self.points.iter().enumerate() {
+                let x = to_x(p.timestamp);
+                let y = to_y(p.pct_7d);
+                if i == 0 {
+                    builder.move_to(cosmic::iced::Point::new(x, y));
+                } else {
+                    builder.line_to(cosmic::iced::Point::new(x, y));
+                }
+            }
+        });
+        frame.stroke(
+            &path_7d,
+            Stroke::default().with_color(COLOR_7D).with_width(1.5),
+        );
+
+        // Legend
+        let legend_y = h - 4.0;
+        frame.fill_text(canvas::Text {
+            content: "● 5h".to_string(),
+            position: cosmic::iced::Point::new(padding_left, legend_y),
+            color: COLOR_5H,
+            size: cosmic::iced::Pixels(9.0),
+            ..canvas::Text::default()
+        });
+        frame.fill_text(canvas::Text {
+            content: "● 7d".to_string(),
+            position: cosmic::iced::Point::new(padding_left + 35.0, legend_y),
+            color: COLOR_7D,
+            size: cosmic::iced::Pixels(9.0),
+            ..canvas::Text::default()
+        });
+
+        vec![frame.into_geometry()]
+    }
+}
+
 impl TokenTrkrApplet {
     fn apply_usage_result(&mut self, result: Result<UsageSnapshot, String>) {
         match result {
             Ok(snapshot) => {
-                info!(
-                    "Usage updated: session={:.0}%",
-                    snapshot
-                        .primary
-                        .as_ref()
-                        .map(|w| w.used_percent)
-                        .unwrap_or(0.0)
-                );
+                let pct_5h = snapshot
+                    .primary
+                    .as_ref()
+                    .map(|w| w.used_percent)
+                    .unwrap_or(0.0);
+                let pct_7d = snapshot
+                    .secondary
+                    .as_ref()
+                    .map(|w| w.used_percent)
+                    .unwrap_or(0.0);
+                info!("Usage updated: session={:.0}%", pct_5h);
+
+                self.history.record(pct_5h, pct_7d);
+                self.history.save();
+
                 self.snapshot = Some(snapshot);
                 self.error = None;
             }
@@ -167,10 +323,13 @@ impl cosmic::Application for TokenTrkrApplet {
             }
         };
 
+        let history = UsageHistory::load();
+
         let app = TokenTrkrApplet {
             core,
             config,
             provider,
+            history,
             ..Default::default()
         };
 
@@ -191,7 +350,6 @@ impl cosmic::Application for TokenTrkrApplet {
 
         let color = bucket_color(pct);
 
-        // During refresh: show a spinning arc; otherwise solid dot
         let refreshing = self.refreshing;
         let spin = self.spin_phase;
 
@@ -200,7 +358,6 @@ impl cosmic::Application for TokenTrkrApplet {
             .height(12)
             .style(move |_theme: &Theme| {
                 if refreshing {
-                    // Spinning effect: partial arc via gradient-like opacity shift
                     let alpha = 0.3 + 0.7 * ((spin.sin() + 1.0) / 2.0);
                     container::Style {
                         background: Some(
@@ -226,7 +383,6 @@ impl cosmic::Application for TokenTrkrApplet {
             });
 
         let label_text = if self.refreshing {
-            // Spinning braille characters for a nice text spinner
             const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let idx = ((self.spin_phase / std::f32::consts::TAU * SPINNER.len() as f32) as usize)
                 % SPINNER.len();
@@ -308,6 +464,37 @@ impl cosmic::Application for TokenTrkrApplet {
                     .push(widget::text(w.format_reset_time()).size(12.0));
             }
 
+            // Per-model breakdown
+            if !snapshot.model_windows.is_empty() {
+                col = col.push(widget::divider::horizontal::default());
+                col = col.push(widget::text("Per-Model Usage").size(13.0));
+
+                for w in &snapshot.model_windows {
+                    let pct = w.used_percent;
+                    let color = bucket_color(pct);
+                    let bar_width = (240.0 * (pct / 100.0).min(1.0)) as u16;
+
+                    let progress = widget::container(
+                        widget::container(widget::horizontal_space())
+                            .width(Length::Fixed(f32::from(bar_width)))
+                            .height(4)
+                            .style(progress_bar_fill(color)),
+                    )
+                    .width(240)
+                    .height(4)
+                    .style(progress_bar_bg);
+
+                    col = col
+                        .push(
+                            widget::row()
+                                .push(widget::text(&w.label).size(12.0).width(Length::Fill))
+                                .push(widget::text(format!("{:.0}%", pct)).size(12.0))
+                                .align_y(Alignment::Center),
+                        )
+                        .push(progress);
+                }
+            }
+
             // Extra usage
             if let Some(ref extra) = snapshot.extra_usage {
                 if extra.is_enabled && extra.monthly_limit > 0.0 {
@@ -337,6 +524,34 @@ impl cosmic::Application for TokenTrkrApplet {
                         );
                 }
             }
+
+            // Usage chart
+            col = col.push(widget::divider::horizontal::default());
+
+            // Time range picker
+            let mut range_row = widget::row().spacing(4);
+            for &range in TimeRange::ALL {
+                let is_selected = range == self.selected_range;
+                let btn = if is_selected {
+                    widget::button::suggested(range.label())
+                } else {
+                    widget::button::standard(range.label())
+                };
+                range_row = range_row.push(btn.on_press(Message::SelectTimeRange(range)));
+            }
+            col = col.push(range_row);
+
+            // Canvas chart
+            let points = self.history.points_for_range(self.selected_range);
+            let chart = UsageChart {
+                points,
+                range: self.selected_range,
+            };
+            col = col.push(
+                widget::Canvas::new(chart)
+                    .width(Length::Fixed(280.0))
+                    .height(Length::Fixed(120.0)),
+            );
 
             // Updated time
             col = col.push(widget::divider::horizontal::default());
@@ -392,7 +607,6 @@ impl cosmic::Application for TokenTrkrApplet {
                     }
                 };
 
-                // Create the refresh channel and send the tx back
                 let (tx, mut rx) = mpsc::channel::<()>(4);
                 _ = channel.send(Message::SetRefreshChannel(tx)).await;
 
@@ -404,7 +618,6 @@ impl cosmic::Application for TokenTrkrApplet {
                     };
                     _ = channel.send(Message::UsageUpdate(result)).await;
 
-                    // Wait for either the poll interval or a manual refresh signal
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(poll_secs)) => {}
                         _ = rx.recv() => {}
@@ -415,7 +628,6 @@ impl cosmic::Application for TokenTrkrApplet {
 
         let mut subs = vec![usage_sub];
 
-        // Spin animation tick — only active during refresh
         if self.refreshing {
             struct SpinTick;
             subs.push(Subscription::run_with_id(
@@ -435,7 +647,6 @@ impl cosmic::Application for TokenTrkrApplet {
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
             Message::UsageUpdate(result) => {
-                // Don't apply immediately — wait for animation to finish minimum cycles
                 if self.refreshing && self.spin_phase < MIN_SPIN_PHASE {
                     self.fetch_done = true;
                     self.pending_snapshot = Some(result);
@@ -451,9 +662,8 @@ impl cosmic::Application for TokenTrkrApplet {
             }
             Message::Tick => {
                 let prev = self.spin_phase;
-                self.spin_phase += std::f32::consts::TAU / 20.0; // 20 ticks @ 20fps = 1s
+                self.spin_phase += std::f32::consts::TAU / 20.0;
 
-                // Stop at a clean cycle boundary: past minimum AND just crossed a full rotation
                 if self.fetch_done && self.spin_phase >= MIN_SPIN_PHASE {
                     let prev_cycle = (prev / std::f32::consts::TAU) as u32;
                     let curr_cycle = (self.spin_phase / std::f32::consts::TAU) as u32;
@@ -480,6 +690,9 @@ impl cosmic::Application for TokenTrkrApplet {
                     .arg("https://claude.ai/settings/usage")
                     .spawn();
             }
+            Message::SelectTimeRange(range) => {
+                self.selected_range = range;
+            }
             Message::TogglePopup => {
                 return if let Some(p) = self.popup.take() {
                     destroy_popup(p)
@@ -497,7 +710,7 @@ impl cosmic::Application for TokenTrkrApplet {
                         .max_width(360.0)
                         .min_width(280.0)
                         .min_height(100.0)
-                        .max_height(500.0);
+                        .max_height(600.0);
                     get_popup(popup_settings)
                 };
             }

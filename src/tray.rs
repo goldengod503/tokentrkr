@@ -149,6 +149,34 @@ impl ksni::Tray for TrkrTray {
                 items.push(MenuItem::Separator);
             }
 
+            // Per-model breakdown
+            if !snapshot.model_windows.is_empty() {
+                items.push(
+                    StandardItem {
+                        label: "Per-Model Usage".to_string(),
+                        enabled: false,
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+                for w in &snapshot.model_windows {
+                    items.push(
+                        StandardItem {
+                            label: format!(
+                                "  {} {}  {:.0}%",
+                                w.label,
+                                w.format_bar(8),
+                                w.used_percent
+                            ),
+                            enabled: false,
+                            ..Default::default()
+                        }
+                        .into(),
+                    );
+                }
+                items.push(MenuItem::Separator);
+            }
+
             // Extra usage
             if let Some(ref extra) = snapshot.extra_usage {
                 if extra.is_enabled && extra.monthly_limit > 0.0 {
