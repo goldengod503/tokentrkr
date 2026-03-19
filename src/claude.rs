@@ -142,8 +142,10 @@ impl ClaudeProvider {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
             let body = resp.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                warn!("429 response — retry-after: {:?}, body: {}", retry_after, body);
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::UNAUTHORIZED
+            {
+                warn!("{} response — retry-after: {:?}, body: {}", status, retry_after, body);
                 bail!(crate::RateLimited);
             }
             bail!("Usage API request failed ({}): {}", status, body);

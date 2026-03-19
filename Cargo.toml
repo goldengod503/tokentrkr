@@ -5,7 +5,7 @@ edition = "2021"
 description = "TokenTrkr — system tray app for tracking Claude token usage on Pop!_OS/COSMIC"
 
 [features]
-default = []
+default = ["cosmic"]
 cosmic = ["dep:libcosmic", "dep:futures-util"]
 
 [dependencies]

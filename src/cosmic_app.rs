@@ -2,8 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use cosmic::iced::widget::canvas::{self, Path, Stroke};
-use cosmic::iced::{mouse, window::Id, Alignment, Length, Limits, Subscription};
+use cosmic::iced::{window::Id, Alignment, Length, Limits, Subscription};
 use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
 use cosmic::prelude::*;
 use cosmic::widget::{self, container};
@@ -123,146 +122,85 @@ fn progress_bar_fill(color: cosmic::iced::Color) -> impl Fn(&Theme) -> container
     }
 }
 
-// Chart colors
-const COLOR_5H: cosmic::iced::Color = cosmic::iced::Color {
-    r: 0.235,
-    g: 0.533,
-    b: 0.988,
-    a: 1.0,
-};
-const COLOR_7D: cosmic::iced::Color = cosmic::iced::Color {
-    r: 0.961,
-    g: 0.620,
-    b: 0.043,
-    a: 1.0,
-};
+fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
+    let w = 280.0_f64;
+    let h = 120.0_f64;
+    let pl = 30.0_f64; // padding left
+    let pr = 8.0_f64;  // padding right
+    let pt = 4.0_f64;  // padding top
+    let pb = 16.0_f64; // padding bottom
+    let cw = w - pl - pr;
+    let ch = h - pt - pb;
 
-struct UsageChart {
-    points: Vec<UsageDataPoint>,
-    range: TimeRange,
-}
+    let mut svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#
+    );
 
-impl canvas::Program<Message, Theme> for UsageChart {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &cosmic::Renderer,
-        _theme: &Theme,
-        bounds: cosmic::iced::Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry<cosmic::Renderer>> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let w = bounds.width;
-        let h = bounds.height;
-        let padding_left = 30.0_f32;
-        let padding_right = 8.0_f32;
-        let padding_top = 4.0_f32;
-        let padding_bottom = 16.0_f32;
-        let chart_w = w - padding_left - padding_right;
-        let chart_h = h - padding_top - padding_bottom;
-
-        // Grid lines and Y-axis labels
-        let grid_color = cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.1);
-        let label_color = cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.4);
-        for &pct in &[0, 25, 50, 75, 100] {
-            let y = padding_top + chart_h * (1.0 - pct as f32 / 100.0);
-            frame.stroke(
-                &Path::line(
-                    cosmic::iced::Point::new(padding_left, y),
-                    cosmic::iced::Point::new(w - padding_right, y),
-                ),
-                Stroke::default()
-                    .with_color(grid_color)
-                    .with_width(1.0),
-            );
-            frame.fill_text(canvas::Text {
-                content: format!("{}%", pct),
-                position: cosmic::iced::Point::new(0.0, y - 5.0),
-                color: label_color,
-                size: cosmic::iced::Pixels(9.0),
-                ..canvas::Text::default()
-            });
-        }
-
-        if self.points.len() < 2 {
-            // "No data" message
-            frame.fill_text(canvas::Text {
-                content: "No history data yet".to_string(),
-                position: cosmic::iced::Point::new(w / 2.0 - 40.0, h / 2.0 - 5.0),
-                color: label_color,
-                size: cosmic::iced::Pixels(11.0),
-                ..canvas::Text::default()
-            });
-            return vec![frame.into_geometry()];
-        }
-
-        let now = chrono::Utc::now();
-        let range_start = now - chrono::Duration::seconds(self.range.seconds());
-        let total_secs = self.range.seconds() as f32;
-
-        let to_x = |ts: chrono::DateTime<chrono::Utc>| -> f32 {
-            let offset = ts.signed_duration_since(range_start).num_seconds() as f32;
-            padding_left + (offset / total_secs).clamp(0.0, 1.0) * chart_w
-        };
-        let to_y = |pct: f64| -> f32 {
-            padding_top + chart_h * (1.0 - (pct / 100.0).clamp(0.0, 1.0) as f32)
-        };
-
-        // Draw 5h line
-        let path_5h = Path::new(|builder| {
-            for (i, p) in self.points.iter().enumerate() {
-                let x = to_x(p.timestamp);
-                let y = to_y(p.pct_5h);
-                if i == 0 {
-                    builder.move_to(cosmic::iced::Point::new(x, y));
-                } else {
-                    builder.line_to(cosmic::iced::Point::new(x, y));
-                }
-            }
-        });
-        frame.stroke(
-            &path_5h,
-            Stroke::default().with_color(COLOR_5H).with_width(1.5),
-        );
-
-        // Draw 7d line
-        let path_7d = Path::new(|builder| {
-            for (i, p) in self.points.iter().enumerate() {
-                let x = to_x(p.timestamp);
-                let y = to_y(p.pct_7d);
-                if i == 0 {
-                    builder.move_to(cosmic::iced::Point::new(x, y));
-                } else {
-                    builder.line_to(cosmic::iced::Point::new(x, y));
-                }
-            }
-        });
-        frame.stroke(
-            &path_7d,
-            Stroke::default().with_color(COLOR_7D).with_width(1.5),
-        );
-
-        // Legend
-        let legend_y = h - 4.0;
-        frame.fill_text(canvas::Text {
-            content: "● 5h".to_string(),
-            position: cosmic::iced::Point::new(padding_left, legend_y),
-            color: COLOR_5H,
-            size: cosmic::iced::Pixels(9.0),
-            ..canvas::Text::default()
-        });
-        frame.fill_text(canvas::Text {
-            content: "● 7d".to_string(),
-            position: cosmic::iced::Point::new(padding_left + 35.0, legend_y),
-            color: COLOR_7D,
-            size: cosmic::iced::Pixels(9.0),
-            ..canvas::Text::default()
-        });
-
-        vec![frame.into_geometry()]
+    // Grid lines + Y labels
+    for &pct in &[0u32, 25, 50, 75, 100] {
+        let y = pt + ch * (1.0 - pct as f64 / 100.0);
+        svg.push_str(&format!(
+            r#"<line x1="{pl}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>"#,
+            x2 = w - pr
+        ));
+        svg.push_str(&format!(
+            r#"<text x="0" y="{:.1}" fill="rgba(255,255,255,0.4)" font-size="9" font-family="sans-serif">{pct}%</text>"#,
+            y + 4.0
+        ));
     }
+
+    if points.len() < 2 {
+        svg.push_str(&format!(
+            r#"<text x="{:.1}" y="{:.1}" fill="rgba(255,255,255,0.4)" font-size="11" font-family="sans-serif">No history data yet</text>"#,
+            w / 2.0 - 40.0, h / 2.0 + 4.0
+        ));
+        svg.push_str("</svg>");
+        return svg;
+    }
+
+    let now = chrono::Utc::now();
+    let range_start = now - chrono::Duration::seconds(range.seconds());
+    let total_secs = range.seconds() as f64;
+
+    let to_x = |ts: chrono::DateTime<chrono::Utc>| -> f64 {
+        let offset = ts.signed_duration_since(range_start).num_seconds() as f64;
+        pl + (offset / total_secs).clamp(0.0, 1.0) * cw
+    };
+    let to_y = |pct: f64| -> f64 {
+        pt + ch * (1.0 - (pct / 100.0).clamp(0.0, 1.0))
+    };
+
+    // Build polyline points strings
+    let pts_5h: String = points
+        .iter()
+        .map(|p| format!("{:.1},{:.1}", to_x(p.timestamp), to_y(p.pct_5h)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let pts_7d: String = points
+        .iter()
+        .map(|p| format!("{:.1},{:.1}", to_x(p.timestamp), to_y(p.pct_7d)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    svg.push_str(&format!(
+        "<polyline points=\"{pts_5h}\" fill=\"none\" stroke=\"#3C88FC\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>"
+    ));
+    svg.push_str(&format!(
+        "<polyline points=\"{pts_7d}\" fill=\"none\" stroke=\"#F59E0B\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>"
+    ));
+
+    // Legend
+    let ly = h - 4.0;
+    svg.push_str(&format!(
+        "<text x=\"{pl}\" y=\"{ly}\" fill=\"#3C88FC\" font-size=\"9\" font-family=\"sans-serif\">\u{25cf} 5h</text>"
+    ));
+    svg.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{ly}\" fill=\"#F59E0B\" font-size=\"9\" font-family=\"sans-serif\">\u{25cf} 7d</text>",
+        pl + 35.0
+    ));
+
+    svg.push_str("</svg>");
+    svg
 }
 
 impl TokenTrkrApplet {
@@ -541,14 +479,12 @@ impl cosmic::Application for TokenTrkrApplet {
             }
             col = col.push(range_row);
 
-            // Canvas chart
+            // SVG chart — rebuilds fresh every view call so range/data changes always render
             let points = self.history.points_for_range(self.selected_range);
-            let chart = UsageChart {
-                points,
-                range: self.selected_range,
-            };
+            let svg_data = build_chart_svg(&points, self.selected_range);
+            let svg_handle = widget::svg::Handle::from_memory(svg_data.into_bytes());
             col = col.push(
-                widget::Canvas::new(chart)
+                widget::Svg::new(svg_handle)
                     .width(Length::Fixed(280.0))
                     .height(Length::Fixed(120.0)),
             );
