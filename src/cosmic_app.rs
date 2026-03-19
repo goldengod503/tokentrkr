@@ -124,11 +124,11 @@ fn progress_bar_fill(color: cosmic::iced::Color) -> impl Fn(&Theme) -> container
 
 fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     let w = 280.0_f64;
-    let h = 120.0_f64;
+    let h = 130.0_f64;
     let pl = 30.0_f64; // padding left
     let pr = 8.0_f64;  // padding right
     let pt = 4.0_f64;  // padding top
-    let pb = 16.0_f64; // padding bottom
+    let pb = 28.0_f64; // padding bottom (room for x-axis labels + legend)
     let cw = w - pl - pr;
     let ch = h - pt - pb;
 
@@ -189,14 +189,50 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
         "<polyline points=\"{pts_7d}\" fill=\"none\" stroke=\"#F59E0B\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>"
     ));
 
+    // X-axis ticks
+    use chrono::{Datelike, Timelike};
+    let chart_bottom = pt + ch;
+    let tick_y2 = chart_bottom + 4.0;
+    let label_y = chart_bottom + 13.0;
+    let (tick_interval_secs, tick_count): (i64, usize) = match range {
+        TimeRange::Hour1  => (15 * 60, 4),
+        TimeRange::Hour6  => (3600, 6),
+        TimeRange::Day1   => (4 * 3600, 6),
+        TimeRange::Day7   => (86400, 7),
+        TimeRange::Day30  => (5 * 86400, 6),
+    };
+    for i in 0..=tick_count {
+        let tick_time = now - chrono::Duration::seconds(range.seconds() - i as i64 * tick_interval_secs);
+        let local = tick_time.with_timezone(&chrono::Local);
+        let label = match range {
+            TimeRange::Hour1 | TimeRange::Hour6 | TimeRange::Day1 =>
+                format!("{:02}:{:02}", local.hour(), local.minute()),
+            TimeRange::Day7 => {
+                const DAYS: [&str; 7] = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+                DAYS[local.weekday().num_days_from_monday() as usize].to_string()
+            }
+            TimeRange::Day30 => format!("{}/{}", local.month(), local.day()),
+        };
+        let x = pl + (i as f64 / tick_count as f64) * cw;
+        // tick mark
+        svg.push_str(&format!(
+            r#"<line x1="{x:.1}" y1="{chart_bottom:.1}" x2="{x:.1}" y2="{tick_y2:.1}" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>"#
+        ));
+        // label — left-align first, right-align last, center others
+        let anchor = if i == 0 { "start" } else if i == tick_count { "end" } else { "middle" };
+        svg.push_str(&format!(
+            r#"<text x="{x:.1}" y="{label_y:.1}" fill="rgba(255,255,255,0.4)" font-size="8" font-family="sans-serif" text-anchor="{anchor}">{label}</text>"#
+        ));
+    }
+
     // Legend
     let ly = h - 4.0;
     svg.push_str(&format!(
-        "<text x=\"{pl}\" y=\"{ly}\" fill=\"#3C88FC\" font-size=\"9\" font-family=\"sans-serif\">\u{25cf} 5h</text>"
+        "<text x=\"{pl}\" y=\"{ly}\" fill=\"#3C88FC\" font-size=\"9\" font-family=\"sans-serif\">\u{25cf} Session</text>"
     ));
     svg.push_str(&format!(
-        "<text x=\"{:.1}\" y=\"{ly}\" fill=\"#F59E0B\" font-size=\"9\" font-family=\"sans-serif\">\u{25cf} 7d</text>",
-        pl + 35.0
+        "<text x=\"{:.1}\" y=\"{ly}\" fill=\"#F59E0B\" font-size=\"9\" font-family=\"sans-serif\">\u{25cf} Weekly</text>",
+        pl + 60.0
     ));
 
     svg.push_str("</svg>");
@@ -486,7 +522,7 @@ impl cosmic::Application for TokenTrkrApplet {
             col = col.push(
                 widget::Svg::new(svg_handle)
                     .width(Length::Fixed(280.0))
-                    .height(Length::Fixed(120.0)),
+                    .height(Length::Fixed(130.0)),
             );
 
             // Updated time
