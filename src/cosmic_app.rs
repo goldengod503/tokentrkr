@@ -625,15 +625,17 @@ impl cosmic::Application for TokenTrkrApplet {
                         .on_press(Message::RefreshNow),
                 )
                 .push(
+                    widget::button::standard("Dashboard")
+                        .on_press(Message::OpenDashboard),
+                )
+                .push(widget::horizontal_space().width(Length::Fill))
+                .push(
                     widget::button::icon(toggle_icon)
                         .on_press(Message::CycleTrayMode)
                         .tooltip(mode.tooltip()),
                 )
-                .push(
-                    widget::button::standard("Dashboard")
-                        .on_press(Message::OpenDashboard),
-                )
-                .spacing(8),
+                .spacing(8)
+                .width(Length::Fill),
         );
 
         self.core.applet.popup_container(col).into()
