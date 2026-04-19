@@ -16,6 +16,47 @@ use crate::history::{TimeRange, UsageDataPoint, UsageHistory};
 use crate::models::UsageSnapshot;
 use crate::provider::Provider;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayMode {
+    Session,
+    Weekly,
+    Both,
+}
+
+impl TrayMode {
+    fn from_config(value: &str) -> Self {
+        match value {
+            "weekly" => TrayMode::Weekly,
+            "both" => TrayMode::Both,
+            _ => TrayMode::Session,
+        }
+    }
+
+    fn as_config(self) -> &'static str {
+        match self {
+            TrayMode::Session => "session",
+            TrayMode::Weekly => "weekly",
+            TrayMode::Both => "both",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            TrayMode::Session => TrayMode::Weekly,
+            TrayMode::Weekly => TrayMode::Both,
+            TrayMode::Both => TrayMode::Session,
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            TrayMode::Session => "Tray: Session",
+            TrayMode::Weekly => "Tray: Weekly",
+            TrayMode::Both => "Tray: Both",
+        }
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
     cosmic::applet::run::<TokenTrkrApplet>(())
         .map_err(|e| anyhow::anyhow!("COSMIC applet error: {}", e))
