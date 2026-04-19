@@ -308,6 +308,62 @@ impl TokenTrkrApplet {
             }
         }
     }
+
+    fn render_tray_window(
+        &self,
+        window: Option<&crate::models::RateWindow>,
+    ) -> Element<'_, Message> {
+        let pct = window.map(|w| w.used_percent).unwrap_or(0.0);
+        let color = bucket_color(pct);
+
+        let refreshing = self.refreshing;
+        let spin = self.spin_phase;
+
+        let dot = widget::container(widget::horizontal_space())
+            .width(12)
+            .height(12)
+            .style(move |_theme: &Theme| {
+                if refreshing {
+                    let alpha = 0.3 + 0.7 * ((spin.sin() + 1.0) / 2.0);
+                    container::Style {
+                        background: Some(
+                            cosmic::iced::Color::from_rgba(color.r, color.g, color.b, alpha).into(),
+                        ),
+                        border: cosmic::iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..container::Style::default()
+                    }
+                } else {
+                    container::Style {
+                        background: Some(color.into()),
+                        border: cosmic::iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..container::Style::default()
+                    }
+                }
+            });
+
+        let label_text = if self.error.is_some() {
+            "ERR".to_string()
+        } else if window.is_some() {
+            format!("{:.0}%", pct)
+        } else {
+            "...".to_string()
+        };
+
+        let label = widget::text(label_text).size(14.0);
+
+        widget::row()
+            .push(dot)
+            .push(label)
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+    }
 }
 
 impl cosmic::Application for TokenTrkrApplet {
@@ -356,70 +412,41 @@ impl cosmic::Application for TokenTrkrApplet {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let pct = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.primary.as_ref())
-            .map(|w| w.used_percent)
-            .unwrap_or(0.0);
+        let mode = TrayMode::from_config(&self.config.display.tray_mode);
 
-        let color = bucket_color(pct);
-
-        let refreshing = self.refreshing;
-        let spin = self.spin_phase;
-
-        let dot = widget::container(widget::horizontal_space())
-            .width(12)
-            .height(12)
-            .style(move |_theme: &Theme| {
-                if refreshing {
-                    let alpha = 0.3 + 0.7 * ((spin.sin() + 1.0) / 2.0);
-                    container::Style {
-                        background: Some(
-                            cosmic::iced::Color::from_rgba(color.r, color.g, color.b, alpha)
-                                .into(),
-                        ),
-                        border: cosmic::iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..container::Style::default()
-                    }
-                } else {
-                    container::Style {
-                        background: Some(color.into()),
-                        border: cosmic::iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..container::Style::default()
-                    }
-                }
-            });
-
-        let label_text = if self.refreshing {
+        let spinner_char = if self.refreshing {
             const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let idx = ((self.spin_phase / std::f32::consts::TAU * SPINNER.len() as f32) as usize)
                 % SPINNER.len();
-            format!("{}", SPINNER[idx])
-        } else if self.error.is_some() {
-            "ERR".to_string()
-        } else if self.snapshot.is_some() {
-            format!("{:.0}%", pct)
+            Some(SPINNER[idx])
         } else {
-            "...".to_string()
+            None
         };
 
-        let label = widget::text(label_text).size(14.0);
+        let primary = self.snapshot.as_ref().and_then(|s| s.primary.as_ref());
+        let secondary = self.snapshot.as_ref().and_then(|s| s.secondary.as_ref());
 
-        let content = widget::container(
-            widget::row()
-                .push(dot)
-                .push(label)
-                .spacing(6)
-                .align_y(Alignment::Center),
-        )
-        .padding([4, 8]);
+        let mut row = widget::row().spacing(6).align_y(Alignment::Center);
+
+        if let Some(ch) = spinner_char {
+            row = row.push(widget::text(format!("{}", ch)).size(14.0));
+        }
+
+        match mode {
+            TrayMode::Session => {
+                row = row.push(self.render_tray_window(primary));
+            }
+            TrayMode::Weekly => {
+                row = row.push(self.render_tray_window(secondary));
+            }
+            TrayMode::Both => {
+                row = row.push(self.render_tray_window(primary));
+                row = row.push(widget::text("|").size(14.0));
+                row = row.push(self.render_tray_window(secondary));
+            }
+        }
+
+        let content = widget::container(row).padding([4, 8]);
 
         let btn = widget::button::custom(self.core.applet.autosize_window(content))
             .on_press(Message::TogglePopup)
