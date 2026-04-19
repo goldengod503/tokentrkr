@@ -112,6 +112,7 @@ pub enum Message {
     FetchStarted,
     SetRefreshChannel(mpsc::Sender<()>),
     SelectTimeRange(TimeRange),
+    CycleTrayMode,
 }
 
 fn bucket_color(pct: f64) -> cosmic::iced::Color {
@@ -612,11 +613,18 @@ impl cosmic::Application for TokenTrkrApplet {
 
         // Actions
         col = col.push(widget::divider::horizontal::default());
+        let mode = TrayMode::from_config(&self.config.display.tray_mode);
+        let toggle_icon = widget::icon::from_name("view-list-symbolic").size(16);
         col = col.push(
             widget::row()
                 .push(
                     widget::button::standard("Refresh")
                         .on_press(Message::RefreshNow),
+                )
+                .push(
+                    widget::button::icon(toggle_icon)
+                        .on_press(Message::CycleTrayMode)
+                        .tooltip(mode.tooltip()),
                 )
                 .push(
                     widget::button::standard("Dashboard")
@@ -732,6 +740,14 @@ impl cosmic::Application for TokenTrkrApplet {
             }
             Message::SelectTimeRange(range) => {
                 self.selected_range = range;
+            }
+            Message::CycleTrayMode => {
+                let current = TrayMode::from_config(&self.config.display.tray_mode);
+                let next = current.next();
+                self.config.display.tray_mode = next.as_config().to_string();
+                if let Err(e) = self.config.save() {
+                    tracing::warn!("Failed to persist tray_mode change: {}", e);
+                }
             }
             Message::TogglePopup => {
                 return if let Some(p) = self.popup.take() {
