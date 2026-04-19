@@ -32,6 +32,8 @@ pub struct DisplayConfig {
     pub show_percent: String,
     #[serde(default = "default_true")]
     pub show_tertiary: bool,
+    #[serde(default = "default_tray_mode")]
+    pub tray_mode: String,
 }
 
 fn default_general() -> GeneralConfig {
@@ -51,6 +53,7 @@ fn default_display() -> DisplayConfig {
     DisplayConfig {
         show_percent: default_show_percent(),
         show_tertiary: true,
+        tray_mode: default_tray_mode(),
     }
 }
 
@@ -68,6 +71,10 @@ fn default_show_percent() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_tray_mode() -> String {
+    "session".to_string()
 }
 
 impl Default for Config {
@@ -148,5 +155,37 @@ impl Config {
 
     pub fn poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.general.poll_interval_minutes * 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_config_defaults_tray_mode_to_session_when_missing() {
+        let toml_without_tray_mode = r#"
+            show_percent = "used"
+            show_tertiary = true
+        "#;
+
+        let cfg: DisplayConfig = toml::from_str(toml_without_tray_mode)
+            .expect("should parse legacy display config");
+
+        assert_eq!(cfg.tray_mode, "session");
+    }
+
+    #[test]
+    fn display_config_round_trips_custom_tray_mode() {
+        let cfg = DisplayConfig {
+            show_percent: "used".to_string(),
+            show_tertiary: true,
+            tray_mode: "both".to_string(),
+        };
+
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let parsed: DisplayConfig = toml::from_str(&serialized).expect("parse");
+
+        assert_eq!(parsed.tray_mode, "both");
     }
 }

@@ -16,6 +16,47 @@ use crate::history::{TimeRange, UsageDataPoint, UsageHistory};
 use crate::models::UsageSnapshot;
 use crate::provider::Provider;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayMode {
+    Session,
+    Weekly,
+    Both,
+}
+
+impl TrayMode {
+    fn from_config(value: &str) -> Self {
+        match value {
+            "weekly" => TrayMode::Weekly,
+            "both" => TrayMode::Both,
+            _ => TrayMode::Session,
+        }
+    }
+
+    fn as_config(self) -> &'static str {
+        match self {
+            TrayMode::Session => "session",
+            TrayMode::Weekly => "weekly",
+            TrayMode::Both => "both",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            TrayMode::Session => TrayMode::Weekly,
+            TrayMode::Weekly => TrayMode::Both,
+            TrayMode::Both => TrayMode::Session,
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            TrayMode::Session => "Tray: Session",
+            TrayMode::Weekly => "Tray: Weekly",
+            TrayMode::Both => "Tray: Both",
+        }
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
     cosmic::applet::run::<TokenTrkrApplet>(())
         .map_err(|e| anyhow::anyhow!("COSMIC applet error: {}", e))
@@ -71,6 +112,7 @@ pub enum Message {
     FetchStarted,
     SetRefreshChannel(mpsc::Sender<()>),
     SelectTimeRange(TimeRange),
+    CycleTrayMode,
 }
 
 fn bucket_color(pct: f64) -> cosmic::iced::Color {
@@ -267,6 +309,61 @@ impl TokenTrkrApplet {
             }
         }
     }
+
+    fn render_tray_window(
+        &self,
+        window: Option<&crate::models::RateWindow>,
+    ) -> Element<'_, Message> {
+        let pct = window.map(|w| w.used_percent).unwrap_or(0.0);
+        let color = bucket_color(pct);
+
+        let refreshing = self.refreshing;
+        let spin = self.spin_phase;
+
+        let dot = widget::container(widget::horizontal_space())
+            .width(12)
+            .height(12)
+            .style(move |_theme: &Theme| {
+                if refreshing {
+                    let alpha = 0.3 + 0.7 * ((spin.sin() + 1.0) / 2.0);
+                    container::Style {
+                        background: Some(
+                            cosmic::iced::Color::from_rgba(color.r, color.g, color.b, alpha).into(),
+                        ),
+                        border: cosmic::iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..container::Style::default()
+                    }
+                } else {
+                    container::Style {
+                        background: Some(color.into()),
+                        border: cosmic::iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..container::Style::default()
+                    }
+                }
+            });
+
+        let label_text: Option<String> = if self.refreshing {
+            None
+        } else if self.error.is_some() {
+            None
+        } else if window.is_some() {
+            Some(format!("{:.0}%", pct))
+        } else {
+            Some("...".to_string())
+        };
+
+        let mut row = widget::row().push(dot).spacing(6).align_y(Alignment::Center);
+        if let Some(text) = label_text {
+            row = row.push(widget::text(text).size(14.0));
+        }
+        row.into()
+    }
 }
 
 impl cosmic::Application for TokenTrkrApplet {
@@ -315,70 +412,45 @@ impl cosmic::Application for TokenTrkrApplet {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let pct = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.primary.as_ref())
-            .map(|w| w.used_percent)
-            .unwrap_or(0.0);
+        let mode = TrayMode::from_config(&self.config.display.tray_mode);
 
-        let color = bucket_color(pct);
-
-        let refreshing = self.refreshing;
-        let spin = self.spin_phase;
-
-        let dot = widget::container(widget::horizontal_space())
-            .width(12)
-            .height(12)
-            .style(move |_theme: &Theme| {
-                if refreshing {
-                    let alpha = 0.3 + 0.7 * ((spin.sin() + 1.0) / 2.0);
-                    container::Style {
-                        background: Some(
-                            cosmic::iced::Color::from_rgba(color.r, color.g, color.b, alpha)
-                                .into(),
-                        ),
-                        border: cosmic::iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..container::Style::default()
-                    }
-                } else {
-                    container::Style {
-                        background: Some(color.into()),
-                        border: cosmic::iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..container::Style::default()
-                    }
-                }
-            });
-
-        let label_text = if self.refreshing {
+        let spinner_char = if self.refreshing {
             const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let idx = ((self.spin_phase / std::f32::consts::TAU * SPINNER.len() as f32) as usize)
                 % SPINNER.len();
-            format!("{}", SPINNER[idx])
-        } else if self.error.is_some() {
-            "ERR".to_string()
-        } else if self.snapshot.is_some() {
-            format!("{:.0}%", pct)
+            Some(SPINNER[idx])
         } else {
-            "...".to_string()
+            None
         };
 
-        let label = widget::text(label_text).size(14.0);
+        let primary = self.snapshot.as_ref().and_then(|s| s.primary.as_ref());
+        let secondary = self.snapshot.as_ref().and_then(|s| s.secondary.as_ref());
 
-        let content = widget::container(
-            widget::row()
-                .push(dot)
-                .push(label)
-                .spacing(6)
-                .align_y(Alignment::Center),
-        )
-        .padding([4, 8]);
+        let mut row = widget::row().spacing(6).align_y(Alignment::Center);
+
+        if let Some(ch) = spinner_char {
+            row = row.push(widget::text(format!("{}", ch)).size(14.0));
+        }
+
+        match mode {
+            TrayMode::Session => {
+                row = row.push(self.render_tray_window(primary));
+            }
+            TrayMode::Weekly => {
+                row = row.push(self.render_tray_window(secondary));
+            }
+            TrayMode::Both => {
+                row = row.push(self.render_tray_window(primary));
+                row = row.push(widget::text("|").size(14.0));
+                row = row.push(self.render_tray_window(secondary));
+            }
+        }
+
+        if self.error.is_some() {
+            row = row.push(widget::text("ERR").size(14.0));
+        }
+
+        let content = widget::container(row).padding([4, 8]);
 
         let btn = widget::button::custom(self.core.applet.autosize_window(content))
             .on_press(Message::TogglePopup)
@@ -544,6 +616,8 @@ impl cosmic::Application for TokenTrkrApplet {
 
         // Actions
         col = col.push(widget::divider::horizontal::default());
+        let mode = TrayMode::from_config(&self.config.display.tray_mode);
+        let toggle_icon = widget::icon::from_name("view-list-symbolic").size(16);
         col = col.push(
             widget::row()
                 .push(
@@ -554,7 +628,14 @@ impl cosmic::Application for TokenTrkrApplet {
                     widget::button::standard("Dashboard")
                         .on_press(Message::OpenDashboard),
                 )
-                .spacing(8),
+                .push(widget::horizontal_space().width(Length::Fill))
+                .push(
+                    widget::button::icon(toggle_icon)
+                        .on_press(Message::CycleTrayMode)
+                        .tooltip(mode.tooltip()),
+                )
+                .spacing(8)
+                .width(Length::Fill),
         );
 
         self.core.applet.popup_container(col).into()
@@ -664,6 +745,14 @@ impl cosmic::Application for TokenTrkrApplet {
             }
             Message::SelectTimeRange(range) => {
                 self.selected_range = range;
+            }
+            Message::CycleTrayMode => {
+                let current = TrayMode::from_config(&self.config.display.tray_mode);
+                let next = current.next();
+                self.config.display.tray_mode = next.as_config().to_string();
+                if let Err(e) = self.config.save() {
+                    tracing::warn!("Failed to persist tray_mode change: {}", e);
+                }
             }
             Message::TogglePopup => {
                 return if let Some(p) = self.popup.take() {

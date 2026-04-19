@@ -7,8 +7,9 @@ System tray app that tracks your Claude token usage on Linux. Works as a **nativ
 ### COSMIC Panel Applet
 
 <img src="assets/tokentrkr_screenshot.png" alt="COSMIC Applet" width="320">
+<img src="assets/TokenTrkr_SessionWeeklyView.png" alt="Session + Weekly view" width="320">
 
-Features a color-coded dot + percentage in the panel, click-to-open popup with progress bars, usage history chart, and a spinning refresh indicator when fetching usage data.
+Features a color-coded dot + percentage in the panel, click-to-open popup with progress bars, usage history chart, and a spinning refresh indicator when fetching usage data. Toggle the tray to show **Session**, **Weekly**, or **Both** windows side-by-side.
 
 ## What it does
 
@@ -27,7 +28,7 @@ Click the tray icon to see:
 - Per-model breakdown (Sonnet, Opus, Cowork — shown when API returns data)
 - Extra usage billing tracker
 - Usage history line chart with selectable time ranges (1h / 6h / 1d / 7d / 30d)
-- Refresh and Dashboard buttons
+- Refresh, Dashboard, and a tray-mode toggle (cycles Session → Weekly → Both) — persists across restarts
 
 **SNI tray menu (KDE, GNOME, etc.):**
 ```
@@ -122,6 +123,7 @@ source = "oauth"
 [display]
 show_percent = "used"     # "used" or "remaining"
 show_tertiary = true      # show Sonnet usage window
+tray_mode = "session"     # "session" | "weekly" | "both" — controls what the panel shows
 ```
 
 ## Feature comparison
