@@ -348,22 +348,21 @@ impl TokenTrkrApplet {
                 }
             });
 
-        let label_text = if self.error.is_some() {
-            "ERR".to_string()
+        let label_text: Option<String> = if self.refreshing {
+            None
+        } else if self.error.is_some() {
+            None
         } else if window.is_some() {
-            format!("{:.0}%", pct)
+            Some(format!("{:.0}%", pct))
         } else {
-            "...".to_string()
+            Some("...".to_string())
         };
 
-        let label = widget::text(label_text).size(14.0);
-
-        widget::row()
-            .push(dot)
-            .push(label)
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .into()
+        let mut row = widget::row().push(dot).spacing(6).align_y(Alignment::Center);
+        if let Some(text) = label_text {
+            row = row.push(widget::text(text).size(14.0));
+        }
+        row.into()
     }
 }
 
@@ -445,6 +444,10 @@ impl cosmic::Application for TokenTrkrApplet {
                 row = row.push(widget::text("|").size(14.0));
                 row = row.push(self.render_tray_window(secondary));
             }
+        }
+
+        if self.error.is_some() {
+            row = row.push(widget::text("ERR").size(14.0));
         }
 
         let content = widget::container(row).padding([4, 8]);
