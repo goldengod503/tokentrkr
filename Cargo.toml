@@ -27,6 +27,6 @@ futures-util = { version = "0.3", optional = true }
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
-rev = "a37be90e811f365273bf632bf7090b63a368f092"
+rev = "17291536a10124a053b40c49bb459d7b5085331b"
 features = ["applet", "tokio", "wayland", "winit"]
 optional = true

@@ -1,14 +1,18 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use cosmic::iced::{window::Id, Alignment, Length, Limits, Subscription};
-use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
+use cosmic::iced::window::Id;
+use cosmic::iced::{Alignment, Length, Limits, Rectangle, Subscription};
 use cosmic::prelude::*;
+use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget::{self, container};
 use cosmic::Theme;
 use futures_util::SinkExt;
 use tracing::{error, info};
+
+static PROVIDER: OnceLock<Arc<dyn Provider>> = OnceLock::new();
+static POLL_SECS: OnceLock<u64> = OnceLock::new();
 
 use crate::claude::ClaudeProvider;
 use crate::config::Config;
@@ -103,7 +107,6 @@ impl Default for TokenTrkrApplet {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    TogglePopup,
     PopupClosed(Id),
     UsageUpdate(Result<UsageSnapshot, String>),
     RefreshNow,
@@ -113,6 +116,7 @@ pub enum Message {
     SetRefreshChannel(mpsc::Sender<()>),
     SelectTimeRange(TimeRange),
     CycleTrayMode,
+    Surface(cosmic::surface::Action),
 }
 
 fn bucket_color(pct: f64) -> cosmic::iced::Color {
@@ -320,7 +324,7 @@ impl TokenTrkrApplet {
         let refreshing = self.refreshing;
         let spin = self.spin_phase;
 
-        let dot = widget::container(widget::horizontal_space())
+        let dot = widget::container(widget::Space::new())
             .width(12)
             .height(12)
             .style(move |_theme: &Theme| {
@@ -358,7 +362,7 @@ impl TokenTrkrApplet {
             Some("...".to_string())
         };
 
-        let mut row = widget::row().push(dot).spacing(6).align_y(Alignment::Center);
+        let mut row = widget::Row::new().push(dot).spacing(6).align_y(Alignment::Center);
         if let Some(text) = label_text {
             row = row.push(widget::text(text).size(14.0));
         }
@@ -394,6 +398,11 @@ impl cosmic::Application for TokenTrkrApplet {
             }
         };
 
+        if let Some(ref p) = provider {
+            let _ = PROVIDER.set(Arc::clone(p));
+        }
+        let _ = POLL_SECS.set(config.general.poll_interval_minutes * 60);
+
         let history = UsageHistory::load();
 
         let app = TokenTrkrApplet {
@@ -426,7 +435,7 @@ impl cosmic::Application for TokenTrkrApplet {
         let primary = self.snapshot.as_ref().and_then(|s| s.primary.as_ref());
         let secondary = self.snapshot.as_ref().and_then(|s| s.secondary.as_ref());
 
-        let mut row = widget::row().spacing(6).align_y(Alignment::Center);
+        let mut row = widget::Row::new().spacing(6).align_y(Alignment::Center);
 
         if let Some(ch) = spinner_char {
             row = row.push(widget::text(format!("{}", ch)).size(14.0));
@@ -451,246 +460,110 @@ impl cosmic::Application for TokenTrkrApplet {
         }
 
         let content = widget::container(row).padding([4, 8]);
+        let have_popup = self.popup;
 
-        let btn = widget::button::custom(self.core.applet.autosize_window(content))
-            .on_press(Message::TogglePopup)
-            .class(cosmic::theme::Button::AppletIcon);
-
-        btn.into()
+        widget::button::custom(self.core.applet.autosize_window(Element::from(content)))
+            .class(cosmic::theme::Button::AppletIcon)
+            .on_press_with_rectangle(move |offset, bounds| {
+                if let Some(id) = have_popup {
+                    Message::Surface(destroy_popup(id))
+                } else {
+                    Message::Surface(app_popup::<TokenTrkrApplet>(
+                        move |state: &mut TokenTrkrApplet| {
+                            let new_id = Id::unique();
+                            state.popup = Some(new_id);
+                            let mut popup_settings = state.core.applet.get_popup_settings(
+                                state.core.main_window_id().unwrap(),
+                                new_id,
+                                None,
+                                None,
+                                None,
+                            );
+                            popup_settings.positioner.size_limits = Limits::NONE
+                                .max_width(360.0)
+                                .min_width(280.0)
+                                .min_height(100.0)
+                                .max_height(600.0);
+                            popup_settings.positioner.offset = match popup_settings.positioner.offset {
+                                (0, y) if y > 0 => (0, y + 8),
+                                (0, y) if y < 0 => (0, y - 8),
+                                (x, 0) if x > 0 => (x + 8, 0),
+                                (x, 0) if x < 0 => (x - 8, 0),
+                                other => other,
+                            };
+                            popup_settings.positioner.anchor_rect = Rectangle {
+                                x: (bounds.x - offset.x) as i32,
+                                y: (bounds.y - offset.y) as i32,
+                                width: bounds.width as i32,
+                                height: bounds.height as i32,
+                            };
+                            popup_settings
+                        },
+                        Some(Box::new(|state: &TokenTrkrApplet| {
+                            state.popup_view().map(cosmic::Action::App)
+                        })),
+                    ))
+                }
+            })
+            .into()
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let mut col = widget::column().spacing(8).padding(12);
-
-        // Title
-        let title = if let Some(ref snap) = self.snapshot {
-            if let Some(ref id) = snap.identity {
-                if let Some(ref plan) = id.plan {
-                    format!("TokenTrkr — {}", format_plan_name(plan))
-                } else {
-                    "TokenTrkr".to_string()
-                }
-            } else {
-                "TokenTrkr".to_string()
-            }
-        } else {
-            "TokenTrkr".to_string()
-        };
-        col = col.push(widget::text::heading(title));
-        col = col.push(widget::divider::horizontal::default());
-
-        if let Some(ref snapshot) = self.snapshot {
-            // Rate windows
-            for w in [&snapshot.primary, &snapshot.secondary, &snapshot.tertiary]
-                .into_iter()
-                .flatten()
-            {
-                let pct = w.used_percent;
-                let color = bucket_color(pct);
-                let bar_width = (240.0 * (pct / 100.0).min(1.0)) as u16;
-
-                let progress = widget::container(
-                    widget::container(widget::horizontal_space())
-                        .width(Length::Fixed(f32::from(bar_width)))
-                        .height(6)
-                        .style(progress_bar_fill(color)),
-                )
-                .width(240)
-                .height(6)
-                .style(progress_bar_bg);
-
-                col = col
-                    .push(
-                        widget::row()
-                            .push(widget::text(&w.label).width(Length::Fill))
-                            .push(widget::text(format!("{:.0}%", pct)))
-                            .align_y(Alignment::Center),
-                    )
-                    .push(progress)
-                    .push(widget::text(w.format_reset_time()).size(12.0));
-            }
-
-            // Per-model breakdown
-            if !snapshot.model_windows.is_empty() {
-                col = col.push(widget::divider::horizontal::default());
-                col = col.push(widget::text("Per-Model Usage").size(13.0));
-
-                for w in &snapshot.model_windows {
-                    let pct = w.used_percent;
-                    let color = bucket_color(pct);
-                    let bar_width = (240.0 * (pct / 100.0).min(1.0)) as u16;
-
-                    let progress = widget::container(
-                        widget::container(widget::horizontal_space())
-                            .width(Length::Fixed(f32::from(bar_width)))
-                            .height(4)
-                            .style(progress_bar_fill(color)),
-                    )
-                    .width(240)
-                    .height(4)
-                    .style(progress_bar_bg);
-
-                    col = col
-                        .push(
-                            widget::row()
-                                .push(widget::text(&w.label).size(12.0).width(Length::Fill))
-                                .push(widget::text(format!("{:.0}%", pct)).size(12.0))
-                                .align_y(Alignment::Center),
-                        )
-                        .push(progress);
-                }
-            }
-
-            // Extra usage
-            if let Some(ref extra) = snapshot.extra_usage {
-                if extra.is_enabled && extra.monthly_limit > 0.0 {
-                    let pct = (extra.used_credits / extra.monthly_limit * 100.0).min(100.0);
-                    let bar_width = (240.0 * (pct / 100.0)) as u16;
-
-                    col = col
-                        .push(widget::divider::horizontal::default())
-                        .push(
-                            widget::row()
-                                .push(widget::text("Extra Usage").width(Length::Fill))
-                                .push(widget::text(format!(
-                                    "${:.2} / ${:.2}",
-                                    extra.used_credits, extra.monthly_limit
-                                ))),
-                        )
-                        .push(
-                            widget::container(
-                                widget::container(widget::horizontal_space())
-                                    .width(Length::Fixed(f32::from(bar_width)))
-                                    .height(6)
-                                    .style(progress_bar_fill(bucket_color(pct))),
-                            )
-                            .width(240)
-                            .height(6)
-                            .style(progress_bar_bg),
-                        );
-                }
-            }
-
-            // Usage chart
-            col = col.push(widget::divider::horizontal::default());
-
-            // Time range picker
-            let mut range_row = widget::row().spacing(4);
-            for &range in TimeRange::ALL {
-                let is_selected = range == self.selected_range;
-                let btn = if is_selected {
-                    widget::button::suggested(range.label())
-                } else {
-                    widget::button::standard(range.label())
-                };
-                range_row = range_row.push(btn.on_press(Message::SelectTimeRange(range)));
-            }
-            col = col.push(range_row);
-
-            // SVG chart — rebuilds fresh every view call so range/data changes always render
-            let points = self.history.points_for_range(self.selected_range);
-            let svg_data = build_chart_svg(&points, self.selected_range);
-            let svg_handle = widget::svg::Handle::from_memory(svg_data.into_bytes());
-            col = col.push(
-                widget::Svg::new(svg_handle)
-                    .width(Length::Fixed(280.0))
-                    .height(Length::Fixed(130.0)),
-            );
-
-            // Updated time
-            col = col.push(widget::divider::horizontal::default());
-            let ago = chrono::Utc::now()
-                .signed_duration_since(snapshot.updated_at)
-                .num_seconds();
-            let updated_text = if ago < 60 {
-                "Updated just now".to_string()
-            } else {
-                format!("Updated {} min ago", ago / 60)
-            };
-            col = col.push(widget::text(updated_text).size(12.0));
-        } else if let Some(ref e) = self.error {
-            col = col.push(widget::text(format!("Error: {}", e)));
-        } else {
-            col = col.push(widget::text("Loading..."));
-        }
-
-        // Actions
-        col = col.push(widget::divider::horizontal::default());
-        let mode = TrayMode::from_config(&self.config.display.tray_mode);
-        let toggle_icon = widget::icon::from_name("view-list-symbolic").size(16);
-        col = col.push(
-            widget::row()
-                .push(
-                    widget::button::standard("Refresh")
-                        .on_press(Message::RefreshNow),
-                )
-                .push(
-                    widget::button::standard("Dashboard")
-                        .on_press(Message::OpenDashboard),
-                )
-                .push(widget::horizontal_space().width(Length::Fill))
-                .push(
-                    widget::button::icon(toggle_icon)
-                        .on_press(Message::CycleTrayMode)
-                        .tooltip(mode.tooltip()),
-                )
-                .spacing(8)
-                .width(Length::Fill),
-        );
-
-        self.core.applet.popup_container(col).into()
+        self.popup_view()
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        let poll_secs = self.config.general.poll_interval_minutes * 60;
-        let provider = self.provider.clone();
-
         struct UsagePoll;
-        let usage_sub = Subscription::run_with_id(
+        let usage_sub = Subscription::run_with(
             std::any::TypeId::of::<UsagePoll>(),
-            cosmic::iced::stream::channel(1, move |mut channel| async move {
-                let Some(provider) = provider else {
-                    _ = channel
-                        .send(Message::UsageUpdate(Err(
-                            "No provider configured".to_string(),
-                        )))
-                        .await;
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(86400)).await;
-                    }
-                };
-
-                let (tx, mut rx) = mpsc::channel::<()>(4);
-                _ = channel.send(Message::SetRefreshChannel(tx)).await;
-
-                loop {
-                    _ = channel.send(Message::FetchStarted).await;
-                    let result = match provider.fetch_usage().await {
-                        Ok(snap) => Ok(snap),
-                        Err(e) => Err(format!("{:#}", e)),
+            |_| {
+                cosmic::iced::stream::channel(1, |mut channel: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+                    let Some(provider) = PROVIDER.get() else {
+                        _ = channel
+                            .send(Message::UsageUpdate(Err(
+                                "No provider configured".to_string(),
+                            )))
+                            .await;
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(86400)).await;
+                        }
                     };
-                    _ = channel.send(Message::UsageUpdate(result)).await;
+                    let poll_secs = POLL_SECS.get().copied().unwrap_or(300);
 
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(poll_secs)) => {}
-                        _ = rx.recv() => {}
+                    let (tx, mut rx) = mpsc::channel::<()>(4);
+                    _ = channel.send(Message::SetRefreshChannel(tx)).await;
+
+                    loop {
+                        _ = channel.send(Message::FetchStarted).await;
+                        let result = match provider.fetch_usage().await {
+                            Ok(snap) => Ok(snap),
+                            Err(e) => Err(format!("{:#}", e)),
+                        };
+                        _ = channel.send(Message::UsageUpdate(result)).await;
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(poll_secs)) => {}
+                            _ = rx.recv() => {}
+                        }
                     }
-                }
-            }),
+                })
+            },
         );
 
         let mut subs = vec![usage_sub];
 
         if self.refreshing {
             struct SpinTick;
-            subs.push(Subscription::run_with_id(
+            subs.push(Subscription::run_with(
                 std::any::TypeId::of::<SpinTick>(),
-                cosmic::iced::stream::channel(1, move |mut channel| async move {
-                    loop {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        _ = channel.send(Message::Tick).await;
-                    }
-                }),
+                |_| {
+                    cosmic::iced::stream::channel(1, |mut channel: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+                        loop {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            _ = channel.send(Message::Tick).await;
+                        }
+                    })
+                },
             ));
         }
 
@@ -754,37 +627,205 @@ impl cosmic::Application for TokenTrkrApplet {
                     tracing::warn!("Failed to persist tray_mode change: {}", e);
                 }
             }
-            Message::TogglePopup => {
-                return if let Some(p) = self.popup.take() {
-                    destroy_popup(p)
-                } else {
-                    let new_id = Id::unique();
-                    self.popup.replace(new_id);
-                    let mut popup_settings = self.core.applet.get_popup_settings(
-                        self.core.main_window_id().unwrap(),
-                        new_id,
-                        None,
-                        None,
-                        None,
-                    );
-                    popup_settings.positioner.size_limits = Limits::NONE
-                        .max_width(360.0)
-                        .min_width(280.0)
-                        .min_height(100.0)
-                        .max_height(600.0);
-                    get_popup(popup_settings)
-                };
-            }
             Message::PopupClosed(id) => {
                 if self.popup.as_ref() == Some(&id) {
                     self.popup = None;
                 }
             }
+            Message::Surface(a) => {
+                return cosmic::task::message(cosmic::Action::Cosmic(
+                    cosmic::app::Action::Surface(a),
+                ));
+            }
         }
         Task::none()
     }
 
-    fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
         Some(cosmic::applet::style())
+    }
+}
+
+impl TokenTrkrApplet {
+    fn popup_view(&self) -> Element<'_, Message> {
+        let mut col = widget::Column::new().spacing(8).padding(12);
+
+        // Title
+        let title = if let Some(ref snap) = self.snapshot {
+            if let Some(ref id) = snap.identity {
+                if let Some(ref plan) = id.plan {
+                    format!("TokenTrkr — {}", format_plan_name(plan))
+                } else {
+                    "TokenTrkr".to_string()
+                }
+            } else {
+                "TokenTrkr".to_string()
+            }
+        } else {
+            "TokenTrkr".to_string()
+        };
+        col = col.push(widget::text::heading(title));
+        col = col.push(widget::divider::horizontal::default());
+
+        if let Some(ref snapshot) = self.snapshot {
+            // Rate windows
+            for w in [&snapshot.primary, &snapshot.secondary, &snapshot.tertiary]
+                .into_iter()
+                .flatten()
+            {
+                let pct = w.used_percent;
+                let color = bucket_color(pct);
+                let bar_width = (240.0 * (pct / 100.0).min(1.0)) as u16;
+
+                let progress = widget::container(
+                    widget::container(widget::Space::new())
+                        .width(Length::Fixed(f32::from(bar_width)))
+                        .height(6)
+                        .style(progress_bar_fill(color)),
+                )
+                .width(240)
+                .height(6)
+                .style(progress_bar_bg);
+
+                col = col
+                    .push(
+                        widget::Row::new()
+                            .push(widget::text(&w.label).width(Length::Fill))
+                            .push(widget::text(format!("{:.0}%", pct)))
+                            .align_y(Alignment::Center),
+                    )
+                    .push(progress)
+                    .push(widget::text(w.format_reset_time()).size(12.0));
+            }
+
+            // Per-model breakdown
+            if !snapshot.model_windows.is_empty() {
+                col = col.push(widget::divider::horizontal::default());
+                col = col.push(widget::text("Per-Model Usage").size(13.0));
+
+                for w in &snapshot.model_windows {
+                    let pct = w.used_percent;
+                    let color = bucket_color(pct);
+                    let bar_width = (240.0 * (pct / 100.0).min(1.0)) as u16;
+
+                    let progress = widget::container(
+                        widget::container(widget::Space::new())
+                            .width(Length::Fixed(f32::from(bar_width)))
+                            .height(4)
+                            .style(progress_bar_fill(color)),
+                    )
+                    .width(240)
+                    .height(4)
+                    .style(progress_bar_bg);
+
+                    col = col
+                        .push(
+                            widget::Row::new()
+                                .push(widget::text(&w.label).size(12.0).width(Length::Fill))
+                                .push(widget::text(format!("{:.0}%", pct)).size(12.0))
+                                .align_y(Alignment::Center),
+                        )
+                        .push(progress);
+                }
+            }
+
+            // Extra usage
+            if let Some(ref extra) = snapshot.extra_usage {
+                if extra.is_enabled && extra.monthly_limit > 0.0 {
+                    let pct = (extra.used_credits / extra.monthly_limit * 100.0).min(100.0);
+                    let bar_width = (240.0 * (pct / 100.0)) as u16;
+
+                    col = col
+                        .push(widget::divider::horizontal::default())
+                        .push(
+                            widget::Row::new()
+                                .push(widget::text("Extra Usage").width(Length::Fill))
+                                .push(widget::text(format!(
+                                    "${:.2} / ${:.2}",
+                                    extra.used_credits, extra.monthly_limit
+                                ))),
+                        )
+                        .push(
+                            widget::container(
+                                widget::container(widget::Space::new())
+                                    .width(Length::Fixed(f32::from(bar_width)))
+                                    .height(6)
+                                    .style(progress_bar_fill(bucket_color(pct))),
+                            )
+                            .width(240)
+                            .height(6)
+                            .style(progress_bar_bg),
+                        );
+                }
+            }
+
+            // Usage chart
+            col = col.push(widget::divider::horizontal::default());
+
+            // Time range picker
+            let mut range_row = widget::Row::new().spacing(4);
+            for &range in TimeRange::ALL {
+                let is_selected = range == self.selected_range;
+                let btn = if is_selected {
+                    widget::button::suggested(range.label())
+                } else {
+                    widget::button::standard(range.label())
+                };
+                range_row = range_row.push(btn.on_press(Message::SelectTimeRange(range)));
+            }
+            col = col.push(range_row);
+
+            // SVG chart — rebuilds fresh every view call so range/data changes always render
+            let points = self.history.points_for_range(self.selected_range);
+            let svg_data = build_chart_svg(&points, self.selected_range);
+            let svg_handle = widget::svg::Handle::from_memory(svg_data.into_bytes());
+            col = col.push(
+                widget::Svg::new(svg_handle)
+                    .width(Length::Fixed(280.0))
+                    .height(Length::Fixed(130.0)),
+            );
+
+            // Updated time
+            col = col.push(widget::divider::horizontal::default());
+            let ago = chrono::Utc::now()
+                .signed_duration_since(snapshot.updated_at)
+                .num_seconds();
+            let updated_text = if ago < 60 {
+                "Updated just now".to_string()
+            } else {
+                format!("Updated {} min ago", ago / 60)
+            };
+            col = col.push(widget::text(updated_text).size(12.0));
+        } else if let Some(ref e) = self.error {
+            col = col.push(widget::text(format!("Error: {}", e)));
+        } else {
+            col = col.push(widget::text("Loading..."));
+        }
+
+        // Actions
+        col = col.push(widget::divider::horizontal::default());
+        let mode = TrayMode::from_config(&self.config.display.tray_mode);
+        let toggle_icon = widget::icon::from_name("view-list-symbolic").size(16);
+        col = col.push(
+            widget::Row::new()
+                .push(
+                    widget::button::standard("Refresh")
+                        .on_press(Message::RefreshNow),
+                )
+                .push(
+                    widget::button::standard("Dashboard")
+                        .on_press(Message::OpenDashboard),
+                )
+                .push(widget::Space::new().width(Length::Fill))
+                .push(
+                    widget::button::icon(toggle_icon)
+                        .on_press(Message::CycleTrayMode)
+                        .tooltip(mode.tooltip()),
+                )
+                .spacing(8)
+                .width(Length::Fill),
+        );
+
+        self.core.applet.popup_container(col).into()
     }
 }
