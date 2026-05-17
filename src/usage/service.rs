@@ -35,6 +35,67 @@ impl UsageService {
         self.retry = retry;
         self
     }
+
+    pub fn spawn(self) -> UsageHandle {
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (refresh_tx, refresh_rx) = mpsc::channel(REFRESH_CHANNEL_CAPACITY);
+
+        tokio::spawn(run_loop(self, event_tx, refresh_rx));
+
+        UsageHandle {
+            events: event_rx,
+            refresh: refresh_tx,
+        }
+    }
+}
+
+async fn run_loop(
+    service: UsageService,
+    events: mpsc::Sender<UsageEvent>,
+    mut refresh_rx: mpsc::Receiver<()>,
+) {
+    let mut fetch_id: u64 = 0;
+
+    loop {
+        // Drain any buffered refresh requests so we don't fire a fetch
+        // immediately after the in-progress one finishes.
+        while let Ok(()) = refresh_rx.try_recv() {}
+
+        emit(&events, UsageEvent::FetchStarted { fetch_id });
+
+        match service.provider.fetch_usage().await {
+            Ok(snapshot) => {
+                emit(&events, UsageEvent::Snapshot { fetch_id, snapshot });
+            }
+            Err(e) => {
+                emit(
+                    &events,
+                    UsageEvent::TransientError {
+                        fetch_id,
+                        message: format!("{:#}", e),
+                        retrying_in: None,
+                    },
+                );
+            }
+        }
+
+        fetch_id += 1;
+
+        // Wait for next interval tick or a refresh request.
+        tokio::select! {
+            _ = tokio::time::sleep(service.poll_interval) => {}
+            _ = refresh_rx.recv() => {}
+        }
+    }
+}
+
+fn emit(tx: &mpsc::Sender<UsageEvent>, event: UsageEvent) {
+    // try_send is intentional: never block the loop on UI backpressure.
+    // On Full, surface a Stalled marker (also try_send — may itself be
+    // dropped). This is the R2 fix.
+    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
+        let _ = tx.try_send(UsageEvent::Stalled);
+    }
 }
 
 #[cfg(test)]
@@ -132,5 +193,24 @@ mod tests {
         let e2 = mock.fetch_usage().await.unwrap_err();
         assert!(e2.downcast_ref::<crate::Unauthorized>().is_some());
         assert_eq!(mock.call_count(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn normal_happy_path_emits_fetch_started_then_snapshot() {
+        let mock = MockProvider::new(vec![MockOutcome::Ok]);
+        let service = UsageService::new(mock, Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        let e1 = handle.events.recv().await.expect("FetchStarted");
+        match e1 {
+            UsageEvent::FetchStarted { fetch_id } => assert_eq!(fetch_id, 0),
+            other => panic!("expected FetchStarted, got {:?}", other),
+        }
+
+        let e2 = handle.events.recv().await.expect("Snapshot");
+        match e2 {
+            UsageEvent::Snapshot { fetch_id, .. } => assert_eq!(fetch_id, 0),
+            other => panic!("expected Snapshot, got {:?}", other),
+        }
     }
 }
