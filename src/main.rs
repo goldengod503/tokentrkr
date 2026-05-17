@@ -69,6 +69,13 @@ fn is_cosmic() -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
+    // libcosmic's applet path builds an iced::daemon, which uses iced_futures'
+    // default tokio executor (uncapped Runtime::new() → num_cpus workers).
+    // Cap it before any runtime is constructed. Safe here: no threads exist yet.
+    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        std::env::set_var("TOKIO_WORKER_THREADS", "2");
+    }
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
