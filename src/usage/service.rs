@@ -388,4 +388,29 @@ mod tests {
             other => panic!("expected Snapshot(1), got {:?}", other),
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_refresh_preempts_dormant_wait() {
+        let mock = MockProvider::new(vec![MockOutcome::Unauthorized, MockOutcome::Ok]);
+        let service = UsageService::new(mock, Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // First cycle: drain FetchStarted + PermanentError
+        let _ = handle.events.recv().await.unwrap();
+        let _ = handle.events.recv().await.unwrap();
+
+        // Advance only 30 seconds — far less than the 15min dormant interval.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        handle.refresh.send(()).await.expect("refresh send");
+
+        // Should fire a new fetch immediately.
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::FetchStarted { fetch_id: 1 } => {}
+            other => panic!("expected FetchStarted(1), got {:?}", other),
+        }
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::Snapshot { fetch_id: 1, .. } => {}
+            other => panic!("expected Snapshot(1), got {:?}", other),
+        }
+    }
 }
