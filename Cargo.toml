@@ -30,3 +30,6 @@ git = "https://github.com/pop-os/libcosmic.git"
 rev = "17291536a10124a053b40c49bb459d7b5085331b"
 features = ["applet", "tokio", "wayland", "winit"]
 optional = true
+
+[dev-dependencies]
+tempfile = "3"

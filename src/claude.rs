@@ -50,6 +50,9 @@ impl ClaudeProvider {
     }
 
     fn write_credentials(&self, creds: &OAuthCredentials) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
         let contents = fs::read_to_string(&self.credentials_path)?;
         let mut raw: serde_json::Value = serde_json::from_str(&contents)?;
 
@@ -60,7 +63,38 @@ impl ClaudeProvider {
         }
 
         let updated = serde_json::to_string_pretty(&raw)?;
-        fs::write(&self.credentials_path, updated)?;
+
+        let tmp_path = self.credentials_path.with_extension("json.tmp");
+        {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .with_context(|| {
+                    format!("Failed to open temp credentials at {}", tmp_path.display())
+                })?;
+            f.write_all(updated.as_bytes())
+                .context("Failed to write credentials to temp file")?;
+            f.sync_all()
+                .context("Failed to sync credentials temp file")?;
+        }
+
+        fs::rename(&tmp_path, &self.credentials_path).with_context(|| {
+            format!(
+                "Failed to atomically replace credentials at {}",
+                self.credentials_path.display()
+            )
+        })?;
+
+        // Defends against an unusual umask (e.g. 0o700) that could mask away
+        // the mode bits passed to open(2).
+        fs::set_permissions(
+            &self.credentials_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .context("Failed to set 0600 mode on credentials")?;
 
         Ok(())
     }
@@ -250,5 +284,71 @@ impl Provider for ClaudeProvider {
             updated_at: Utc::now(),
             identity: Some(identity),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn make_creds() -> OAuthCredentials {
+        OAuthCredentials {
+            access_token: "test_access".to_string(),
+            refresh_token: "test_refresh".to_string(),
+            expires_at: 1_700_000_000_000,
+            scopes: None,
+            subscription_type: None,
+            rate_limit_tier: None,
+        }
+    }
+
+    fn make_provider(path: &std::path::Path) -> ClaudeProvider {
+        let mut config = Config::default();
+        config.claude.credentials_path = Some(path.to_string_lossy().into_owned());
+        ClaudeProvider::new(&config).expect("provider")
+    }
+
+    #[test]
+    fn write_credentials_results_in_0600_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+
+        fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old","expiresAt":0}}"#,
+        )
+        .expect("seed");
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("seed mode");
+
+        make_provider(&path)
+            .write_credentials(&make_creds())
+            .expect("write");
+
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+    }
+
+    #[test]
+    fn write_credentials_preserves_unrelated_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+
+        fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old","expiresAt":0,"scopes":["a"]},"otherKey":"keep me"}"#,
+        )
+        .expect("seed");
+
+        make_provider(&path)
+            .write_credentials(&make_creds())
+            .expect("write");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(value["otherKey"], "keep me");
+        assert_eq!(value["claudeAiOauth"]["accessToken"], "test_access");
+        assert_eq!(value["claudeAiOauth"]["scopes"][0], "a");
+        assert_eq!(value["claudeAiOauth"]["expiresAt"], 1_700_000_000_000u64);
     }
 }
