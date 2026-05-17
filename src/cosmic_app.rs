@@ -80,6 +80,7 @@ pub struct TokenTrkrApplet {
     pending_snapshot: Option<Result<UsageSnapshot, String>>,
     history: UsageHistory,
     selected_range: TimeRange,
+    latest_fetch_id: u64,
 }
 
 const MIN_SPIN_CYCLES: f32 = 3.0;
@@ -101,6 +102,7 @@ impl Default for TokenTrkrApplet {
             pending_snapshot: None,
             history: UsageHistory::default(),
             selected_range: TimeRange::Day1,
+            latest_fetch_id: 0,
         }
     }
 }
@@ -108,7 +110,8 @@ impl Default for TokenTrkrApplet {
 #[derive(Debug, Clone)]
 pub enum Message {
     PopupClosed(Id),
-    UsageUpdate(Result<UsageSnapshot, String>),
+    UsageUpdate(Result<UsageSnapshot, String>), // legacy — removed in Task 17
+    Usage(crate::usage::UsageEvent),            // NEW
     RefreshNow,
     OpenDashboard,
     Tick,
@@ -286,6 +289,37 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
 }
 
 impl TokenTrkrApplet {
+    /// Translates a UsageEvent into the applet's existing state mutations.
+    /// Generation-guards via fetch_id (B3 fix).
+    fn handle_event(&mut self, event: crate::usage::UsageEvent) {
+        use crate::usage::UsageEvent;
+        match event {
+            UsageEvent::FetchStarted { fetch_id } => {
+                self.latest_fetch_id = fetch_id;
+                self.refreshing = true;
+                self.spin_phase = 0.0;
+                self.fetch_done = false;
+                self.pending_snapshot = None;
+            }
+            UsageEvent::Snapshot { fetch_id, snapshot } => {
+                if fetch_id != self.latest_fetch_id {
+                    return; // stale — ignore
+                }
+                self.apply_usage_result(Ok(snapshot));
+            }
+            UsageEvent::TransientError { fetch_id, message, .. }
+            | UsageEvent::PermanentError { fetch_id, message } => {
+                if fetch_id != self.latest_fetch_id {
+                    return;
+                }
+                self.apply_usage_result(Err(message));
+            }
+            UsageEvent::Stalled => {
+                // UI was busy; no state change. Could surface a warning later.
+            }
+        }
+    }
+
     fn apply_usage_result(&mut self, result: Result<UsageSnapshot, String>) {
         match result {
             Ok(snapshot) => {
@@ -572,6 +606,9 @@ impl cosmic::Application for TokenTrkrApplet {
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
+            Message::Usage(event) => {
+                self.handle_event(event);
+            }
             Message::UsageUpdate(result) => {
                 if self.refreshing && self.spin_phase < MIN_SPIN_PHASE {
                     self.fetch_done = true;
