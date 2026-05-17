@@ -5,20 +5,34 @@ use tokio::sync::mpsc;
 
 use crate::icon::build_icon;
 use crate::models::UsageSnapshot;
-use crate::polling::PollCommand;
+use crate::usage::UsageEvent;
 
 pub struct TrkrTray {
     pub snapshot: Option<UsageSnapshot>,
     pub error: Option<String>,
-    cmd_tx: mpsc::Sender<PollCommand>,
+    refresh_tx: mpsc::Sender<()>,
 }
 
 impl TrkrTray {
-    pub fn new(cmd_tx: mpsc::Sender<PollCommand>) -> Self {
+    pub fn new(refresh_tx: mpsc::Sender<()>) -> Self {
         Self {
             snapshot: None,
             error: None,
-            cmd_tx,
+            refresh_tx,
+        }
+    }
+
+    pub fn apply_event(&mut self, event: &UsageEvent) {
+        match event {
+            UsageEvent::Snapshot { snapshot, .. } => {
+                self.snapshot = Some(snapshot.clone());
+                self.error = None;
+            }
+            UsageEvent::TransientError { message, .. }
+            | UsageEvent::PermanentError { message, .. } => {
+                self.error = Some(message.clone());
+            }
+            UsageEvent::FetchStarted { .. } | UsageEvent::Stalled => {}
         }
     }
 
@@ -260,12 +274,12 @@ impl ksni::Tray for TrkrTray {
         items.push(MenuItem::Separator);
 
         // Actions
-        let cmd_tx = self.cmd_tx.clone();
+        let refresh_tx = self.refresh_tx.clone();
         items.push(
             StandardItem {
                 label: "Refresh Now".to_string(),
                 activate: Box::new(move |_tray: &mut Self| {
-                    let _ = cmd_tx.try_send(PollCommand::RefreshNow);
+                    let _ = refresh_tx.try_send(());
                 }),
                 ..Default::default()
             }
@@ -295,5 +309,77 @@ impl ksni::Tray for TrkrTray {
         );
 
         items
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{AccountIdentity, UsageSnapshot};
+    use chrono::Utc;
+
+    fn make_tray() -> TrkrTray {
+        let (tx, _rx) = mpsc::channel(1);
+        TrkrTray::new(tx)
+    }
+
+    fn synthetic_snapshot() -> UsageSnapshot {
+        UsageSnapshot {
+            primary: None,
+            secondary: None,
+            tertiary: None,
+            model_windows: vec![],
+            extra_usage: None,
+            updated_at: Utc::now(),
+            identity: Some(AccountIdentity {
+                email: None,
+                organization: None,
+                plan: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn snapshot_event_sets_snapshot_and_clears_error() {
+        let mut t = make_tray();
+        t.error = Some("prev".into());
+        t.apply_event(&UsageEvent::Snapshot {
+            fetch_id: 0,
+            snapshot: synthetic_snapshot(),
+        });
+        assert!(t.snapshot.is_some());
+        assert!(t.error.is_none());
+    }
+
+    #[test]
+    fn transient_error_sets_error_message() {
+        let mut t = make_tray();
+        t.apply_event(&UsageEvent::TransientError {
+            fetch_id: 0,
+            message: "rate limited".into(),
+            retrying_in: None,
+        });
+        assert_eq!(t.error.as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn permanent_error_sets_error_message() {
+        let mut t = make_tray();
+        t.apply_event(&UsageEvent::PermanentError {
+            fetch_id: 0,
+            message: "auth failed".into(),
+        });
+        assert_eq!(t.error.as_deref(), Some("auth failed"));
+    }
+
+    #[test]
+    fn fetch_started_and_stalled_are_no_ops() {
+        let mut t = make_tray();
+        t.snapshot = None;
+        t.error = None;
+        t.apply_event(&UsageEvent::FetchStarted { fetch_id: 0 });
+        assert!(t.snapshot.is_none() && t.error.is_none());
+        t.apply_event(&UsageEvent::Stalled);
+        assert!(t.snapshot.is_none() && t.error.is_none());
     }
 }
