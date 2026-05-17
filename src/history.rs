@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, error};
 
 use crate::config::Config;
@@ -107,13 +107,15 @@ impl UsageHistory {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        match serde_json::to_string(&self) {
-            Ok(json) => {
-                if let Err(e) = fs::write(&path, json) {
-                    error!("Failed to write history: {}", e);
-                }
+        let json = match serde_json::to_string(&self) {
+            Ok(j) => j,
+            Err(e) => {
+                error!("Failed to serialize history: {}", e);
+                return;
             }
-            Err(e) => error!("Failed to serialize history: {}", e),
+        };
+        if let Err(e) = atomic_write(&path, json.as_bytes()) {
+            error!("Failed to write history: {}", e);
         }
     }
 
@@ -130,5 +132,63 @@ impl UsageHistory {
             .filter(|p| p.timestamp >= start)
             .cloned()
             .collect()
+    }
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.json");
+        fs::write(&path, b"stale").expect("seed");
+
+        atomic_write(&path, b"fresh").expect("write");
+
+        assert_eq!(fs::read(&path).expect("read"), b"fresh");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_tmp_artifact_on_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.json");
+        atomic_write(&path, b"{}").expect("write");
+
+        let tmp = path.with_extension("json.tmp");
+        assert!(!tmp.exists(), "tmp artifact should be renamed away");
+    }
+
+    #[test]
+    fn save_then_load_round_trips_data_points() {
+        // We can't redirect history_path() to a tempdir without a deeper
+        // refactor, so round-trip via the serde format directly. This is
+        // the property atomic_write exists to preserve.
+        let mut h = UsageHistory::default();
+        h.record(13.0, 27.5);
+        h.record(0.0, 100.0);
+
+        let json = serde_json::to_string(&h).expect("ser");
+        let back: UsageHistory = serde_json::from_str(&json).expect("de");
+
+        assert_eq!(back.data_points.len(), 2);
+        assert_eq!(back.data_points[0].pct_5h, 13.0);
+        assert_eq!(back.data_points[1].pct_7d, 100.0);
     }
 }
