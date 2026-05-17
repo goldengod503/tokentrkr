@@ -48,41 +48,63 @@ impl UsageService {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum State {
+    Normal,
+    Dormant,
+}
+
+#[derive(Debug)]
+enum FetchOutcome {
+    Success,
+    Transient,
+    Permanent,
+}
+
 async fn run_loop(
     service: UsageService,
     events: mpsc::Sender<UsageEvent>,
     mut refresh_rx: mpsc::Receiver<()>,
 ) {
     let mut fetch_id: u64 = 0;
+    let mut state = State::Normal;
 
     loop {
         while let Ok(()) = refresh_rx.try_recv() {}
 
         emit(&events, UsageEvent::FetchStarted { fetch_id });
-        do_one_fetch(&service, fetch_id, &events).await;
+        let outcome = do_one_fetch(&service, fetch_id, &events).await;
         fetch_id += 1;
 
+        state = match (state, outcome) {
+            (_, FetchOutcome::Permanent) => State::Dormant,
+            (State::Dormant, FetchOutcome::Success) => State::Normal,
+            (s, _) => s,
+        };
+
+        let wait = match state {
+            State::Normal => service.poll_interval,
+            State::Dormant => service.retry.dormant_interval,
+        };
+
         tokio::select! {
-            _ = tokio::time::sleep(service.poll_interval) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = refresh_rx.recv() => {}
         }
     }
 }
 
-/// Execute one fetch cycle including the 429 retry ladder.
-/// Emits TransientError/Snapshot as appropriate.
 async fn do_one_fetch(
     service: &UsageService,
     fetch_id: u64,
     events: &mpsc::Sender<UsageEvent>,
-) {
+) -> FetchOutcome {
     let delays = service.retry.rate_limit_delays;
-    // attempts = initial + each ladder step
     for attempt in 0..=delays.len() {
         match service.provider.fetch_usage().await {
             Ok(snapshot) => {
                 emit(events, UsageEvent::Snapshot { fetch_id, snapshot });
-                return;
+                return FetchOutcome::Success;
             }
             Err(e) if e.downcast_ref::<crate::RateLimited>().is_some() => {
                 let retrying_in = delays.get(attempt).copied();
@@ -97,9 +119,18 @@ async fn do_one_fetch(
                 if let Some(d) = retrying_in {
                     tokio::time::sleep(d).await;
                 } else {
-                    // Ladder exhausted; fall through to normal interval wait.
-                    return;
+                    return FetchOutcome::Transient;
                 }
+            }
+            Err(e) if e.downcast_ref::<crate::Unauthorized>().is_some() => {
+                emit(
+                    events,
+                    UsageEvent::PermanentError {
+                        fetch_id,
+                        message: format!("{:#}", e),
+                    },
+                );
+                return FetchOutcome::Permanent;
             }
             Err(e) => {
                 emit(
@@ -110,10 +141,11 @@ async fn do_one_fetch(
                         retrying_in: None,
                     },
                 );
-                return;
+                return FetchOutcome::Transient;
             }
         }
     }
+    FetchOutcome::Transient
 }
 
 fn emit(tx: &mpsc::Sender<UsageEvent>, event: UsageEvent) {
@@ -303,5 +335,33 @@ mod tests {
             UsageEvent::TransientError { retrying_in: None, .. } => {}
             other => panic!("expected TransientError(None), got {:?}", other),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unauthorized_emits_permanent_error_then_no_normal_poll() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::Unauthorized,
+            MockOutcome::Ok, // would be served if loop kept polling normally
+        ]);
+        let service = UsageService::new(mock.clone(), Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // FetchStarted (fetch_id 0)
+        let _ = handle.events.recv().await.unwrap();
+        // PermanentError
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::PermanentError { fetch_id: 0, .. } => {}
+            other => panic!("expected PermanentError, got {:?}", other),
+        }
+
+        // Advance 10 minutes — well past the 5min normal poll, far short of 15min dormant.
+        tokio::time::advance(Duration::from_secs(600)).await;
+
+        // No new event should be available — service is dormant.
+        let next = tokio::time::timeout(Duration::from_millis(50), handle.events.recv()).await;
+        assert!(next.is_err(), "expected no event in dormant state, got {:?}", next);
+
+        // Mock should have been called exactly once.
+        assert_eq!(mock.call_count(), 1);
     }
 }
