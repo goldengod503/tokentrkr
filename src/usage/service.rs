@@ -101,7 +101,27 @@ async fn do_one_fetch(
 ) -> FetchOutcome {
     let delays = service.retry.rate_limit_delays;
     for attempt in 0..=delays.len() {
-        match service.provider.fetch_usage().await {
+        let fetch_result = match tokio::time::timeout(
+            service.retry.fetch_timeout,
+            service.provider.fetch_usage(),
+        ).await {
+            Ok(r) => r,
+            Err(_elapsed) => {
+                emit(
+                    events,
+                    UsageEvent::TransientError {
+                        fetch_id,
+                        message: format!(
+                            "Fetch timed out after {}s",
+                            service.retry.fetch_timeout.as_secs()
+                        ),
+                        retrying_in: None,
+                    },
+                );
+                return FetchOutcome::Transient;
+            }
+        };
+        match fetch_result {
             Ok(snapshot) => {
                 emit(events, UsageEvent::Snapshot { fetch_id, snapshot });
                 return FetchOutcome::Success;

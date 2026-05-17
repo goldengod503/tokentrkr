@@ -308,17 +308,31 @@ impl TokenTrkrApplet {
                 if fetch_id != self.latest_fetch_id {
                     return; // stale — ignore
                 }
-                self.apply_usage_result(Ok(snapshot));
+                if self.refreshing && self.spin_phase < MIN_SPIN_PHASE {
+                    self.fetch_done = true;
+                    self.pending_snapshot = Some(Ok(snapshot));
+                } else {
+                    self.apply_usage_result(Ok(snapshot));
+                    self.refreshing = false;
+                    self.fetch_done = false;
+                }
             }
             UsageEvent::TransientError { fetch_id, message, .. }
             | UsageEvent::PermanentError { fetch_id, message } => {
                 if fetch_id != self.latest_fetch_id {
                     return;
                 }
-                self.apply_usage_result(Err(message));
+                if self.refreshing && self.spin_phase < MIN_SPIN_PHASE {
+                    self.fetch_done = true;
+                    self.pending_snapshot = Some(Err(message));
+                } else {
+                    self.apply_usage_result(Err(message));
+                    self.refreshing = false;
+                    self.fetch_done = false;
+                }
             }
             UsageEvent::Stalled => {
-                // UI was busy; no state change. Could surface a warning later.
+                // UI was busy; no state change.
             }
         }
     }
