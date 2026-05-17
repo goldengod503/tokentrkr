@@ -99,8 +99,22 @@ impl ClaudeProvider {
         Ok(())
     }
 
-    fn is_expired(creds: &OAuthCredentials) -> bool {
-        let now_ms = Utc::now().timestamp_millis() as u64;
+    fn is_expired(creds: &OAuthCredentials, now_ms: u64) -> bool {
+        // Defends against well-known bad values on disk:
+        //   - 0 (CLI never initialized expiresAt)
+        //   - seconds-as-ms (a value below 2001-09-09 in ms is implausible
+        //     and almost certainly seconds stored where ms was expected)
+        // In both cases we force a refresh rather than trust the value,
+        // because the alternative ("never expired") leaves the user stuck
+        // on a stale access token with no signal.
+        const PLAUSIBLE_MS_MIN: u64 = 1_000_000_000_000;
+        if creds.expires_at < PLAUSIBLE_MS_MIN {
+            warn!(
+                "Implausible expiresAt={} on disk; forcing token refresh",
+                creds.expires_at
+            );
+            return true;
+        }
         // Refresh 60 seconds early
         creds.expires_at < now_ms + 60_000
     }
@@ -149,8 +163,9 @@ impl ClaudeProvider {
 
     async fn get_valid_credentials(&self) -> Result<OAuthCredentials> {
         let creds = self.read_credentials()?;
+        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
 
-        if Self::is_expired(&creds) {
+        if Self::is_expired(&creds, now_ms) {
             debug!("Token expired, refreshing");
             self.refresh_token(&creds).await
         } else {
@@ -379,6 +394,59 @@ mod tests {
         assert_eq!(super::sanitize_utilization(f64::NAN), 0.0);
         assert_eq!(super::sanitize_utilization(f64::INFINITY), 0.0);
         assert_eq!(super::sanitize_utilization(f64::NEG_INFINITY), 0.0);
+    }
+
+    fn creds_expiring_at(expires_at: u64) -> OAuthCredentials {
+        OAuthCredentials {
+            access_token: "a".to_string(),
+            refresh_token: "r".to_string(),
+            expires_at,
+            scopes: None,
+            subscription_type: None,
+            rate_limit_tier: None,
+        }
+    }
+
+    #[test]
+    fn is_expired_returns_true_for_zero_expires_at() {
+        // Known CLI failure mode — uninitialized timestamp.
+        assert!(ClaudeProvider::is_expired(
+            &creds_expiring_at(0),
+            1_700_000_000_000
+        ));
+    }
+
+    #[test]
+    fn is_expired_returns_true_for_seconds_stored_as_milliseconds() {
+        // 1_700_000_000 seconds (2023-11) below the 2001 ms threshold.
+        assert!(ClaudeProvider::is_expired(
+            &creds_expiring_at(1_700_000_000),
+            1_700_000_000_000
+        ));
+    }
+
+    #[test]
+    fn is_expired_returns_true_for_past_ms_value() {
+        // Token expired one hour ago.
+        let now = 1_700_000_000_000u64;
+        assert!(ClaudeProvider::is_expired(&creds_expiring_at(now - 3_600_000), now));
+    }
+
+    #[test]
+    fn is_expired_returns_true_for_value_inside_60s_skew_window() {
+        // We refresh 60s early to avoid races; 30s in the future is "expired".
+        let now = 1_700_000_000_000u64;
+        assert!(ClaudeProvider::is_expired(&creds_expiring_at(now + 30_000), now));
+    }
+
+    #[test]
+    fn is_expired_returns_false_for_value_outside_skew_window() {
+        // 5 minutes in the future — not expired.
+        let now = 1_700_000_000_000u64;
+        assert!(!ClaudeProvider::is_expired(
+            &creds_expiring_at(now + 300_000),
+            now
+        ));
     }
 
     #[test]

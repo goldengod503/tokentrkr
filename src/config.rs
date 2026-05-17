@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -28,10 +28,6 @@ pub struct ClaudeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayConfig {
-    #[serde(default = "default_show_percent")]
-    pub show_percent: String,
-    #[serde(default = "default_true")]
-    pub show_tertiary: bool,
     #[serde(default = "default_tray_mode")]
     pub tray_mode: String,
 }
@@ -51,8 +47,6 @@ fn default_claude() -> ClaudeConfig {
 
 fn default_display() -> DisplayConfig {
     DisplayConfig {
-        show_percent: default_show_percent(),
-        show_tertiary: true,
         tray_mode: default_tray_mode(),
     }
 }
@@ -63,14 +57,6 @@ fn default_poll_interval() -> u64 {
 
 fn default_source() -> String {
     "oauth".to_string()
-}
-
-fn default_show_percent() -> String {
-    "used".to_string()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_tray_mode() -> String {
@@ -135,16 +121,7 @@ impl Config {
 
     pub fn credentials_path(&self) -> PathBuf {
         if let Some(ref custom) = self.claude.credentials_path {
-            let expanded = if custom.starts_with('~') {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(&custom[2..])
-                } else {
-                    PathBuf::from(custom)
-                }
-            } else {
-                PathBuf::from(custom)
-            };
-            expanded
+            expand_tilde(custom, dirs::home_dir().as_deref())
         } else {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -158,28 +135,32 @@ impl Config {
     }
 }
 
+fn expand_tilde(custom: &str, home: Option<&Path>) -> PathBuf {
+    if custom == "~" {
+        return home.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(custom));
+    }
+    if let Some(rest) = custom.strip_prefix("~/") {
+        if let Some(home) = home {
+            return home.join(rest);
+        }
+    }
+    // "~user/..." and absolute/relative paths pass through unchanged.
+    PathBuf::from(custom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn display_config_defaults_tray_mode_to_session_when_missing() {
-        let toml_without_tray_mode = r#"
-            show_percent = "used"
-            show_tertiary = true
-        "#;
-
-        let cfg: DisplayConfig = toml::from_str(toml_without_tray_mode)
-            .expect("should parse legacy display config");
-
+        let cfg: DisplayConfig = toml::from_str("").expect("parse empty");
         assert_eq!(cfg.tray_mode, "session");
     }
 
     #[test]
     fn display_config_round_trips_custom_tray_mode() {
         let cfg = DisplayConfig {
-            show_percent: "used".to_string(),
-            show_tertiary: true,
             tray_mode: "both".to_string(),
         };
 
@@ -187,5 +168,57 @@ mod tests {
         let parsed: DisplayConfig = toml::from_str(&serialized).expect("parse");
 
         assert_eq!(parsed.tray_mode, "both");
+    }
+
+    #[test]
+    fn display_config_ignores_legacy_show_percent_and_show_tertiary() {
+        let legacy = r#"
+            show_percent = "used"
+            show_tertiary = true
+            tray_mode = "weekly"
+        "#;
+        let cfg: DisplayConfig = toml::from_str(legacy).expect("parse legacy");
+        assert_eq!(cfg.tray_mode, "weekly");
+    }
+
+    #[test]
+    fn expand_tilde_handles_bare_tilde() {
+        let home = PathBuf::from("/home/me");
+        assert_eq!(expand_tilde("~", Some(&home)), PathBuf::from("/home/me"));
+    }
+
+    #[test]
+    fn expand_tilde_replaces_tilde_slash_prefix() {
+        let home = PathBuf::from("/home/me");
+        assert_eq!(
+            expand_tilde("~/.claude/.credentials.json", Some(&home)),
+            PathBuf::from("/home/me/.claude/.credentials.json")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_other_user_path_unchanged() {
+        let home = PathBuf::from("/home/me");
+        // We do not try to resolve ~other_user/... — best-effort by leaving it
+        // literal so a downstream "file not found" error is unambiguous.
+        assert_eq!(
+            expand_tilde("~other/foo", Some(&home)),
+            PathBuf::from("~other/foo")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_passes_absolute_path_through() {
+        let home = PathBuf::from("/home/me");
+        assert_eq!(
+            expand_tilde("/etc/creds.json", Some(&home)),
+            PathBuf::from("/etc/creds.json")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_when_home_unavailable_returns_literal() {
+        assert_eq!(expand_tilde("~/foo", None), PathBuf::from("~/foo"));
+        assert_eq!(expand_tilde("~", None), PathBuf::from("~"));
     }
 }
