@@ -30,7 +30,6 @@ impl UsageService {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -57,34 +56,62 @@ async fn run_loop(
     let mut fetch_id: u64 = 0;
 
     loop {
-        // Drain any buffered refresh requests so we don't fire a fetch
-        // immediately after the in-progress one finishes.
         while let Ok(()) = refresh_rx.try_recv() {}
 
         emit(&events, UsageEvent::FetchStarted { fetch_id });
+        do_one_fetch(&service, fetch_id, &events).await;
+        fetch_id += 1;
 
+        tokio::select! {
+            _ = tokio::time::sleep(service.poll_interval) => {}
+            _ = refresh_rx.recv() => {}
+        }
+    }
+}
+
+/// Execute one fetch cycle including the 429 retry ladder.
+/// Emits TransientError/Snapshot as appropriate.
+async fn do_one_fetch(
+    service: &UsageService,
+    fetch_id: u64,
+    events: &mpsc::Sender<UsageEvent>,
+) {
+    let delays = service.retry.rate_limit_delays;
+    // attempts = initial + each ladder step
+    for attempt in 0..=delays.len() {
         match service.provider.fetch_usage().await {
             Ok(snapshot) => {
-                emit(&events, UsageEvent::Snapshot { fetch_id, snapshot });
+                emit(events, UsageEvent::Snapshot { fetch_id, snapshot });
+                return;
+            }
+            Err(e) if e.downcast_ref::<crate::RateLimited>().is_some() => {
+                let retrying_in = delays.get(attempt).copied();
+                emit(
+                    events,
+                    UsageEvent::TransientError {
+                        fetch_id,
+                        message: format!("{:#}", e),
+                        retrying_in,
+                    },
+                );
+                if let Some(d) = retrying_in {
+                    tokio::time::sleep(d).await;
+                } else {
+                    // Ladder exhausted; fall through to normal interval wait.
+                    return;
+                }
             }
             Err(e) => {
                 emit(
-                    &events,
+                    events,
                     UsageEvent::TransientError {
                         fetch_id,
                         message: format!("{:#}", e),
                         retrying_in: None,
                     },
                 );
+                return;
             }
-        }
-
-        fetch_id += 1;
-
-        // Wait for next interval tick or a refresh request.
-        tokio::select! {
-            _ = tokio::time::sleep(service.poll_interval) => {}
-            _ = refresh_rx.recv() => {}
         }
     }
 }
@@ -193,6 +220,40 @@ mod tests {
         let e2 = mock.fetch_usage().await.unwrap_err();
         assert!(e2.downcast_ref::<crate::Unauthorized>().is_some());
         assert_eq!(mock.call_count(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_ladder_emits_three_transient_then_snapshot() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited,
+            MockOutcome::Ok,
+        ]);
+        let service = UsageService::new(mock, Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // FetchStarted
+        assert!(matches!(
+            handle.events.recv().await.unwrap(),
+            UsageEvent::FetchStarted { fetch_id: 0 }
+        ));
+
+        for expected_delay in [Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(60)] {
+            match handle.events.recv().await.unwrap() {
+                UsageEvent::TransientError { fetch_id: 0, retrying_in: Some(d), .. } => {
+                    assert_eq!(d, expected_delay);
+                }
+                other => panic!("expected TransientError(retrying_in=Some({:?})), got {:?}", expected_delay, other),
+            }
+            // Advance past the retry delay so the loop's sleep returns.
+            tokio::time::advance(expected_delay + Duration::from_millis(10)).await;
+        }
+
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::Snapshot { fetch_id: 0, .. } => {}
+            other => panic!("expected Snapshot, got {:?}", other),
+        }
     }
 
     #[tokio::test(start_paused = true)]
