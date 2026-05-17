@@ -50,6 +50,9 @@ impl ClaudeProvider {
     }
 
     fn write_credentials(&self, creds: &OAuthCredentials) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
         let contents = fs::read_to_string(&self.credentials_path)?;
         let mut raw: serde_json::Value = serde_json::from_str(&contents)?;
 
@@ -60,7 +63,38 @@ impl ClaudeProvider {
         }
 
         let updated = serde_json::to_string_pretty(&raw)?;
-        fs::write(&self.credentials_path, updated)?;
+
+        let tmp_path = self.credentials_path.with_extension("json.tmp");
+        {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .with_context(|| {
+                    format!("Failed to open temp credentials at {}", tmp_path.display())
+                })?;
+            f.write_all(updated.as_bytes())
+                .context("Failed to write credentials to temp file")?;
+            f.sync_all()
+                .context("Failed to sync credentials temp file")?;
+        }
+
+        fs::rename(&tmp_path, &self.credentials_path).with_context(|| {
+            format!(
+                "Failed to atomically replace credentials at {}",
+                self.credentials_path.display()
+            )
+        })?;
+
+        // Defends against an unusual umask (e.g. 0o700) that could mask away
+        // the mode bits passed to open(2).
+        fs::set_permissions(
+            &self.credentials_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .context("Failed to set 0600 mode on credentials")?;
 
         Ok(())
     }
@@ -142,11 +176,13 @@ impl ClaudeProvider {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
             let body = resp.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::UNAUTHORIZED
-            {
-                warn!("{} response — retry-after: {:?}, body: {}", status, retry_after, body);
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                warn!("429 response — retry-after: {:?}, body: {}", retry_after, body);
                 bail!(crate::RateLimited);
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                warn!("401 response — body: {}", body);
+                bail!(crate::Unauthorized);
             }
             bail!("Usage API request failed ({}): {}", status, body);
         }
@@ -161,10 +197,19 @@ fn parse_reset_time(s: &str) -> Option<DateTime<Utc>> {
     s.parse::<DateTime<Utc>>().ok()
 }
 
+fn sanitize_utilization(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, 100.0)
+    } else {
+        warn!("Non-finite utilization {} from API; coercing to 0.0", v);
+        0.0
+    }
+}
+
 fn window_from_response(resp: &WindowResponse, label: &str, window_minutes: Option<u32>) -> RateWindow {
     RateWindow {
         label: label.to_string(),
-        used_percent: resp.utilization,
+        used_percent: sanitize_utilization(resp.utilization),
         window_minutes,
         resets_at: resp.resets_at.as_deref().and_then(parse_reset_time),
         reset_description: None,
@@ -233,6 +278,15 @@ impl Provider for ClaudeProvider {
             plan: creds.subscription_type.clone(),
         };
 
+        if primary.is_none()
+            && secondary.is_none()
+            && tertiary.is_none()
+            && model_windows.is_empty()
+            && extra.is_none()
+        {
+            bail!(crate::EmptyResponse);
+        }
+
         if let Some(ref p) = primary {
             info!(
                 "Usage fetched: session={:.0}%, weekly={:.0}%",
@@ -250,5 +304,103 @@ impl Provider for ClaudeProvider {
             updated_at: Utc::now(),
             identity: Some(identity),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn make_creds() -> OAuthCredentials {
+        OAuthCredentials {
+            access_token: "test_access".to_string(),
+            refresh_token: "test_refresh".to_string(),
+            expires_at: 1_700_000_000_000,
+            scopes: None,
+            subscription_type: None,
+            rate_limit_tier: None,
+        }
+    }
+
+    fn make_provider(path: &std::path::Path) -> ClaudeProvider {
+        let mut config = Config::default();
+        config.claude.credentials_path = Some(path.to_string_lossy().into_owned());
+        ClaudeProvider::new(&config).expect("provider")
+    }
+
+    #[test]
+    fn write_credentials_results_in_0600_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+
+        fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old","expiresAt":0}}"#,
+        )
+        .expect("seed");
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("seed mode");
+
+        make_provider(&path)
+            .write_credentials(&make_creds())
+            .expect("write");
+
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+    }
+
+    #[test]
+    fn unauthorized_sentinel_renders_user_facing_message() {
+        assert_eq!(
+            crate::Unauthorized.to_string(),
+            "Authentication failed — re-login in Claude Code"
+        );
+    }
+
+    #[test]
+    fn empty_response_sentinel_renders_user_facing_message() {
+        assert_eq!(
+            crate::EmptyResponse.to_string(),
+            "Claude usage API returned no data"
+        );
+    }
+
+    #[test]
+    fn sanitize_utilization_clamps_finite_values() {
+        assert_eq!(super::sanitize_utilization(-5.0), 0.0);
+        assert_eq!(super::sanitize_utilization(0.0), 0.0);
+        assert_eq!(super::sanitize_utilization(50.0), 50.0);
+        assert_eq!(super::sanitize_utilization(100.0), 100.0);
+        assert_eq!(super::sanitize_utilization(105.7), 100.0);
+    }
+
+    #[test]
+    fn sanitize_utilization_coerces_nan_and_infinity() {
+        assert_eq!(super::sanitize_utilization(f64::NAN), 0.0);
+        assert_eq!(super::sanitize_utilization(f64::INFINITY), 0.0);
+        assert_eq!(super::sanitize_utilization(f64::NEG_INFINITY), 0.0);
+    }
+
+    #[test]
+    fn write_credentials_preserves_unrelated_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+
+        fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old","expiresAt":0,"scopes":["a"]},"otherKey":"keep me"}"#,
+        )
+        .expect("seed");
+
+        make_provider(&path)
+            .write_credentials(&make_creds())
+            .expect("write");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(value["otherKey"], "keep me");
+        assert_eq!(value["claudeAiOauth"]["accessToken"], "test_access");
+        assert_eq!(value["claudeAiOauth"]["scopes"][0], "a");
+        assert_eq!(value["claudeAiOauth"]["expiresAt"], 1_700_000_000_000u64);
     }
 }
