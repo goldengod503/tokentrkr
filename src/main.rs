@@ -48,6 +48,20 @@ impl fmt::Display for Unauthorized {
 
 impl std::error::Error for Unauthorized {}
 
+/// Sentinel error for a structurally valid but semantically empty usage
+/// response (every field None / empty). Surfaced instead of silently
+/// writing 0% to the history chart.
+#[derive(Debug)]
+pub struct EmptyResponse;
+
+impl fmt::Display for EmptyResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Claude usage API returned no data")
+    }
+}
+
+impl std::error::Error for EmptyResponse {}
+
 fn is_cosmic() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP")
         .map(|v| v.to_uppercase().contains("COSMIC"))

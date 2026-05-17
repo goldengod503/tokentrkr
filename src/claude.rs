@@ -197,10 +197,19 @@ fn parse_reset_time(s: &str) -> Option<DateTime<Utc>> {
     s.parse::<DateTime<Utc>>().ok()
 }
 
+fn sanitize_utilization(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, 100.0)
+    } else {
+        warn!("Non-finite utilization {} from API; coercing to 0.0", v);
+        0.0
+    }
+}
+
 fn window_from_response(resp: &WindowResponse, label: &str, window_minutes: Option<u32>) -> RateWindow {
     RateWindow {
         label: label.to_string(),
-        used_percent: resp.utilization,
+        used_percent: sanitize_utilization(resp.utilization),
         window_minutes,
         resets_at: resp.resets_at.as_deref().and_then(parse_reset_time),
         reset_description: None,
@@ -268,6 +277,15 @@ impl Provider for ClaudeProvider {
             organization: None,
             plan: creds.subscription_type.clone(),
         };
+
+        if primary.is_none()
+            && secondary.is_none()
+            && tertiary.is_none()
+            && model_windows.is_empty()
+            && extra.is_none()
+        {
+            bail!(crate::EmptyResponse);
+        }
 
         if let Some(ref p) = primary {
             info!(
@@ -337,6 +355,30 @@ mod tests {
             crate::Unauthorized.to_string(),
             "Authentication failed — re-login in Claude Code"
         );
+    }
+
+    #[test]
+    fn empty_response_sentinel_renders_user_facing_message() {
+        assert_eq!(
+            crate::EmptyResponse.to_string(),
+            "Claude usage API returned no data"
+        );
+    }
+
+    #[test]
+    fn sanitize_utilization_clamps_finite_values() {
+        assert_eq!(super::sanitize_utilization(-5.0), 0.0);
+        assert_eq!(super::sanitize_utilization(0.0), 0.0);
+        assert_eq!(super::sanitize_utilization(50.0), 50.0);
+        assert_eq!(super::sanitize_utilization(100.0), 100.0);
+        assert_eq!(super::sanitize_utilization(105.7), 100.0);
+    }
+
+    #[test]
+    fn sanitize_utilization_coerces_nan_and_infinity() {
+        assert_eq!(super::sanitize_utilization(f64::NAN), 0.0);
+        assert_eq!(super::sanitize_utilization(f64::INFINITY), 0.0);
+        assert_eq!(super::sanitize_utilization(f64::NEG_INFINITY), 0.0);
     }
 
     #[test]
