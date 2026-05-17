@@ -18,6 +18,29 @@ pub struct ClaudeProvider {
     client: reqwest::Client,
 }
 
+/// Outcome of ensuring we have valid credentials.
+///
+/// The distinction matters for 429 handling: a 429 *after* we just refreshed
+/// is a genuine rate-limit, so re-refreshing would burn another (potentially
+/// single-use) refresh token for no gain. A 429 on a *cached* token may be
+/// Claude Code rotating credentials under us — one targeted refresh is the
+/// right recovery there.
+enum CredentialsOutcome {
+    Cached(OAuthCredentials),
+    Refreshed(OAuthCredentials),
+}
+
+impl CredentialsOutcome {
+    fn creds(&self) -> &OAuthCredentials {
+        match self {
+            Self::Cached(c) | Self::Refreshed(c) => c,
+        }
+    }
+    fn was_refreshed(&self) -> bool {
+        matches!(self, Self::Refreshed(_))
+    }
+}
+
 impl ClaudeProvider {
     pub fn new(config: &Config) -> Result<Self> {
         let credentials_path = config.credentials_path();
@@ -161,15 +184,16 @@ impl ClaudeProvider {
         Ok(new_creds)
     }
 
-    async fn get_valid_credentials(&self) -> Result<OAuthCredentials> {
+    async fn ensure_fresh_credentials(&self) -> Result<CredentialsOutcome> {
         let creds = self.read_credentials()?;
         let now_ms = Utc::now().timestamp_millis().max(0) as u64;
 
         if Self::is_expired(&creds, now_ms) {
             debug!("Token expired, refreshing");
-            self.refresh_token(&creds).await
+            let fresh = self.refresh_token(&creds).await?;
+            Ok(CredentialsOutcome::Refreshed(fresh))
         } else {
-            Ok(creds)
+            Ok(CredentialsOutcome::Cached(creds))
         }
     }
 
@@ -238,14 +262,21 @@ impl Provider for ClaudeProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageSnapshot> {
-        let creds = self.get_valid_credentials().await?;
+        let outcome = self.ensure_fresh_credentials().await?;
+        let creds = outcome.creds();
         let api_resp = match self.fetch_usage_api(&creds.access_token).await {
             Ok(resp) => resp,
             Err(e) if e.downcast_ref::<crate::RateLimited>().is_some() => {
-                // 429 often means a stale token (Claude Code may have refreshed
-                // credentials on disk, invalidating our copy). Re-read from disk
-                // and force a token refresh before propagating.
-                info!("Got 429, re-reading credentials and refreshing token");
+                if outcome.was_refreshed() {
+                    // Token was just refreshed this call — 429 is a genuine
+                    // rate-limit, not a stale-token symptom. Burning another
+                    // refresh chasing it risks invalidating a single-use RT.
+                    return Err(e);
+                }
+                // Cached token may be stale: Claude Code can rotate
+                // credentials on disk under us between our read and the API
+                // call. Re-read and force one refresh before propagating.
+                info!("Got 429 on cached token, re-reading and refreshing");
                 let disk_creds = self.read_credentials()?;
                 let fresh = self.refresh_token(&disk_creds).await?;
                 self.fetch_usage_api(&fresh.access_token).await?
@@ -447,6 +478,17 @@ mod tests {
             &creds_expiring_at(now + 300_000),
             now
         ));
+    }
+
+    #[test]
+    fn credentials_outcome_distinguishes_cached_from_refreshed() {
+        let cached = CredentialsOutcome::Cached(make_creds());
+        let refreshed = CredentialsOutcome::Refreshed(make_creds());
+
+        assert!(!cached.was_refreshed());
+        assert!(refreshed.was_refreshed());
+        assert_eq!(cached.creds().access_token, "test_access");
+        assert_eq!(refreshed.creds().access_token, "test_access");
     }
 
     #[test]
