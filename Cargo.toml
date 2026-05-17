@@ -10,7 +10,7 @@ cosmic = ["dep:libcosmic", "dep:futures-util"]
 
 [dependencies]
 ksni = "0.3"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
