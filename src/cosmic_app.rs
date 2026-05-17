@@ -8,13 +8,13 @@ use cosmic::prelude::*;
 use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget::{self, container};
 use cosmic::Theme;
-use futures_util::SinkExt;
+use cosmic::iced::futures::SinkExt;
 use tracing::{error, info};
 
-static PROVIDER: OnceLock<Arc<dyn Provider>> = OnceLock::new();
-static POLL_SECS: OnceLock<u64> = OnceLock::new();
+static USAGE_HANDLE: OnceLock<tokio::sync::Mutex<Option<crate::usage::UsageHandle>>> =
+    OnceLock::new();
+static BOOTSTRAP: OnceLock<(Arc<dyn Provider>, Duration)> = OnceLock::new();
 
-use crate::claude::ClaudeProvider;
 use crate::config::Config;
 use crate::history::{TimeRange, UsageDataPoint, UsageHistory};
 use crate::models::UsageSnapshot;
@@ -61,7 +61,14 @@ impl TrayMode {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(provider: Arc<dyn Provider>, poll_interval: Duration) -> anyhow::Result<()> {
+    // UsageService::spawn must run inside libcosmic's tokio runtime,
+    // which isn't created until cosmic::applet::run() is called.
+    // Stash inputs in BOOTSTRAP; init() reads and spawns.
+    BOOTSTRAP
+        .set((provider, poll_interval))
+        .map_err(|_| anyhow::anyhow!("BOOTSTRAP already set"))?;
+
     cosmic::applet::run::<TokenTrkrApplet>(())
         .map_err(|e| anyhow::anyhow!("COSMIC applet error: {}", e))
 }
@@ -72,7 +79,6 @@ pub struct TokenTrkrApplet {
     snapshot: Option<UsageSnapshot>,
     error: Option<String>,
     config: Config,
-    provider: Option<Arc<dyn Provider>>,
     refreshing: bool,
     spin_phase: f32,
     refresh_tx: Option<mpsc::Sender<()>>,
@@ -94,7 +100,6 @@ impl Default for TokenTrkrApplet {
             snapshot: None,
             error: None,
             config: Config::default(),
-            provider: None,
             refreshing: false,
             spin_phase: 0.0,
             refresh_tx: None,
@@ -110,12 +115,10 @@ impl Default for TokenTrkrApplet {
 #[derive(Debug, Clone)]
 pub enum Message {
     PopupClosed(Id),
-    UsageUpdate(Result<UsageSnapshot, String>), // legacy — removed in Task 17
-    Usage(crate::usage::UsageEvent),            // NEW
+    Usage(crate::usage::UsageEvent),
     RefreshNow,
     OpenDashboard,
     Tick,
-    FetchStarted,
     SetRefreshChannel(mpsc::Sender<()>),
     SelectTimeRange(TimeRange),
     CycleTrayMode,
@@ -424,28 +427,21 @@ impl cosmic::Application for TokenTrkrApplet {
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
         let config = Config::load().unwrap_or_default();
-        let provider: Option<Arc<dyn Provider>> = match ClaudeProvider::new(&config) {
-            Ok(p) => Some(Arc::new(p)),
-            Err(e) => {
-                error!("Failed to create provider: {}", e);
-                None
-            }
-        };
-
-        if let Some(ref p) = provider {
-            let _ = PROVIDER.set(Arc::clone(p));
-        }
-        let _ = POLL_SECS.set(config.general.poll_interval_minutes * 60);
-
         let history = UsageHistory::load();
 
         let app = TokenTrkrApplet {
             core,
             config,
-            provider,
             history,
             ..Default::default()
         };
+
+        let (provider, poll_interval) = BOOTSTRAP
+            .get()
+            .cloned()
+            .expect("BOOTSTRAP not initialized — cosmic_app::run must be called first");
+        let handle = crate::usage::UsageService::new(provider, poll_interval).spawn();
+        let _ = USAGE_HANDLE.set(tokio::sync::Mutex::new(Some(handle)));
 
         (app, Task::none())
     }
@@ -551,34 +547,28 @@ impl cosmic::Application for TokenTrkrApplet {
         let usage_sub = Subscription::run_with(
             std::any::TypeId::of::<UsagePoll>(),
             |_| {
-                cosmic::iced::stream::channel(1, |mut channel: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-                    let Some(provider) = PROVIDER.get() else {
-                        _ = channel
-                            .send(Message::UsageUpdate(Err(
-                                "No provider configured".to_string(),
-                            )))
-                            .await;
+                cosmic::iced::stream::channel(8, |mut channel: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+                    let handle_opt = USAGE_HANDLE
+                        .get()
+                        .expect("USAGE_HANDLE not initialized")
+                        .lock()
+                        .await
+                        .take();
+
+                    let Some(mut handle) = handle_opt else {
+                        // Already taken (subscription restarted unexpectedly).
+                        // Stay idle.
                         loop {
                             tokio::time::sleep(Duration::from_secs(86400)).await;
                         }
                     };
-                    let poll_secs = POLL_SECS.get().copied().unwrap_or(300);
 
-                    let (tx, mut rx) = mpsc::channel::<()>(4);
-                    _ = channel.send(Message::SetRefreshChannel(tx)).await;
+                    _ = channel
+                        .send(Message::SetRefreshChannel(handle.refresh.clone()))
+                        .await;
 
-                    loop {
-                        _ = channel.send(Message::FetchStarted).await;
-                        let result = match provider.fetch_usage().await {
-                            Ok(snap) => Ok(snap),
-                            Err(e) => Err(format!("{:#}", e)),
-                        };
-                        _ = channel.send(Message::UsageUpdate(result)).await;
-
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(poll_secs)) => {}
-                            _ = rx.recv() => {}
-                        }
+                    while let Some(event) = handle.events.recv().await {
+                        _ = channel.send(Message::Usage(event)).await;
                     }
                 })
             },
@@ -608,20 +598,6 @@ impl cosmic::Application for TokenTrkrApplet {
         match message {
             Message::Usage(event) => {
                 self.handle_event(event);
-            }
-            Message::UsageUpdate(result) => {
-                if self.refreshing && self.spin_phase < MIN_SPIN_PHASE {
-                    self.fetch_done = true;
-                    self.pending_snapshot = Some(result);
-                } else {
-                    self.apply_usage_result(result);
-                    self.refreshing = false;
-                    self.fetch_done = false;
-                }
-            }
-            Message::FetchStarted => {
-                self.refreshing = true;
-                self.spin_phase = 0.0;
             }
             Message::Tick => {
                 let prev = self.spin_phase;
