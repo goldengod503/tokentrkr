@@ -413,4 +413,27 @@ mod tests {
             other => panic!("expected Snapshot(1), got {:?}", other),
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_id_increments_monotonically_across_cycles() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::Ok,
+            MockOutcome::Ok,
+            MockOutcome::Ok,
+        ]);
+        let service = UsageService::new(mock, Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        for expected_id in 0u64..3 {
+            match handle.events.recv().await.unwrap() {
+                UsageEvent::FetchStarted { fetch_id } => assert_eq!(fetch_id, expected_id),
+                other => panic!("expected FetchStarted({}), got {:?}", expected_id, other),
+            }
+            match handle.events.recv().await.unwrap() {
+                UsageEvent::Snapshot { fetch_id, .. } => assert_eq!(fetch_id, expected_id),
+                other => panic!("expected Snapshot({}), got {:?}", expected_id, other),
+            }
+            tokio::time::advance(Duration::from_secs(301)).await;
+        }
+    }
 }
