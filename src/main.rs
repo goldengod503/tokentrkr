@@ -34,6 +34,20 @@ impl fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
+/// Sentinel error for 401 responses. Distinct from `RateLimited` so the
+/// polling loop does not retry — credentials are revoked or invalid and
+/// the user must re-authenticate.
+#[derive(Debug)]
+pub struct Unauthorized;
+
+impl fmt::Display for Unauthorized {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Authentication failed — re-login in Claude Code")
+    }
+}
+
+impl std::error::Error for Unauthorized {}
+
 fn is_cosmic() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP")
         .map(|v| v.to_uppercase().contains("COSMIC"))

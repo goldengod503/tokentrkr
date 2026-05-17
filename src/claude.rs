@@ -176,11 +176,13 @@ impl ClaudeProvider {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
             let body = resp.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::UNAUTHORIZED
-            {
-                warn!("{} response — retry-after: {:?}, body: {}", status, retry_after, body);
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                warn!("429 response — retry-after: {:?}, body: {}", retry_after, body);
                 bail!(crate::RateLimited);
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                warn!("401 response — body: {}", body);
+                bail!(crate::Unauthorized);
             }
             bail!("Usage API request failed ({}): {}", status, body);
         }
@@ -327,6 +329,14 @@ mod tests {
 
         let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+    }
+
+    #[test]
+    fn unauthorized_sentinel_renders_user_facing_message() {
+        assert_eq!(
+            crate::Unauthorized.to_string(),
+            "Authentication failed — re-login in Claude Code"
+        );
     }
 
     #[test]
