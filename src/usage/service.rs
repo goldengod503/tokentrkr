@@ -274,4 +274,34 @@ mod tests {
             other => panic!("expected Snapshot, got {:?}", other),
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_ladder_exhausted_emits_final_transient_with_none() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited,
+        ]);
+        let service = UsageService::new(mock, Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // FetchStarted
+        let _ = handle.events.recv().await.unwrap();
+
+        for expected_delay in [Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(60)] {
+            match handle.events.recv().await.unwrap() {
+                UsageEvent::TransientError { retrying_in: Some(d), .. } => {
+                    assert_eq!(d, expected_delay);
+                }
+                other => panic!("expected TransientError Some, got {:?}", other),
+            }
+            tokio::time::advance(expected_delay + Duration::from_millis(10)).await;
+        }
+
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::TransientError { retrying_in: None, .. } => {}
+            other => panic!("expected TransientError(None), got {:?}", other),
+        }
+    }
 }
