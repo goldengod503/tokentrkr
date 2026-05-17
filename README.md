@@ -147,4 +147,5 @@ tray_mode = "session"     # "session" | "weekly" | "both" — controls what the 
 
 ## License
 
-MIT
+MIT for the TokenTrkr source. The bundled `assets/DejaVuSans-Bold.ttf` is
+distributed under the Bitstream Vera Fonts License — see `LICENSE-DEJAVU.txt`.

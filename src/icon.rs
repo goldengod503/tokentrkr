@@ -5,7 +5,7 @@ const SIZE: i32 = 256;
 const CENTER: f64 = 127.5;
 const RADIUS: f64 = 120.0;
 
-const FONT_DATA: &[u8] = include_bytes!("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf");
+const FONT_DATA: &[u8] = include_bytes!("../assets/DejaVuSans-Bold.ttf");
 
 pub fn build_icon(used_percent: Option<f64>) -> Icon {
     let pct = used_percent.unwrap_or(0.0).clamp(0.0, 100.0);
