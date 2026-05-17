@@ -364,4 +364,28 @@ mod tests {
         // Mock should have been called exactly once.
         assert_eq!(mock.call_count(), 1);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn dormant_returns_to_normal_after_15min_success() {
+        let mock = MockProvider::new(vec![MockOutcome::Unauthorized, MockOutcome::Ok]);
+        let service = UsageService::new(mock, Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // First cycle: FetchStarted, PermanentError
+        let _ = handle.events.recv().await.unwrap();
+        let _ = handle.events.recv().await.unwrap();
+
+        // Advance the 15-min dormant interval.
+        tokio::time::advance(Duration::from_secs(15 * 60 + 1)).await;
+
+        // Second cycle: FetchStarted (id=1), Snapshot (id=1)
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::FetchStarted { fetch_id: 1 } => {}
+            other => panic!("expected FetchStarted(1), got {:?}", other),
+        }
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::Snapshot { fetch_id: 1, .. } => {}
+            other => panic!("expected Snapshot(1), got {:?}", other),
+        }
+    }
 }
