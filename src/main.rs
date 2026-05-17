@@ -2,25 +2,26 @@ mod claude;
 mod config;
 mod history;
 mod models;
-mod polling;
 mod provider;
 mod icon;
 mod tray;
+mod usage;
 #[cfg(feature = "cosmic")]
 mod cosmic_app;
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use claude::ClaudeProvider;
-use config::Config;
+use crate::claude::ClaudeProvider;
+use crate::config::Config;
+use crate::provider::Provider;
+use crate::tray::TrkrTray;
+use crate::usage::{UsageEvent, UsageHandle, UsageService};
 use ksni::TrayMethods;
-use polling::{run_poll_loop, PollCommand};
-use provider::Provider;
-use tray::TrkrTray;
 
 /// Sentinel error for 429 responses so the polling loop can retry with backoff.
 #[derive(Debug)]
@@ -69,14 +70,10 @@ fn is_cosmic() -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
-    // libcosmic's applet path builds an iced::daemon, which uses iced_futures'
-    // default tokio executor (uncapped Runtime::new() → num_cpus workers).
-    // Cap it before any runtime is constructed. Safe here: no threads exist yet.
     if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
         std::env::set_var("TOKIO_WORKER_THREADS", "2");
     }
 
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -85,11 +82,17 @@ fn main() -> anyhow::Result<()> {
 
     info!("TokenTrkr starting");
 
+    let config = Config::load()?;
+    info!("Config loaded, poll interval: {}m", config.general.poll_interval_minutes);
+
+    let provider: Arc<dyn Provider> = Arc::new(ClaudeProvider::new(&config)?);
+    let poll_interval = Duration::from_secs(config.general.poll_interval_minutes * 60);
+
     if is_cosmic() {
         #[cfg(feature = "cosmic")]
         {
             info!("COSMIC desktop detected, using native applet");
-            return cosmic_app::run();
+            return cosmic_app::run(provider, poll_interval);
         }
         #[cfg(not(feature = "cosmic"))]
         {
@@ -99,28 +102,30 @@ fn main() -> anyhow::Result<()> {
         info!("Using SNI tray (compatible with GNOME, KDE, COSMIC, etc.)");
     }
 
-    // SNI tray path — build a tokio runtime
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run_sni())
+    rt.block_on(run_sni(provider, poll_interval))
 }
 
-async fn run_sni() -> anyhow::Result<()> {
-    let config = Config::load()?;
-    info!(
-        "Config loaded, poll interval: {}m",
-        config.general.poll_interval_minutes
-    );
+async fn run_sni(provider: Arc<dyn Provider>, poll_interval: Duration) -> anyhow::Result<()> {
+    let UsageHandle { events, refresh } = UsageService::new(provider, poll_interval).spawn();
 
-    let provider: Arc<dyn Provider> = Arc::new(ClaudeProvider::new(&config)?);
-    let (cmd_tx, cmd_rx) = mpsc::channel::<PollCommand>(16);
+    let tray = TrkrTray::new(refresh);
+    let tray_handle: ksni::Handle<TrkrTray> = tray.spawn().await.expect("Failed to create system tray");
 
-    let tray = TrkrTray::new(cmd_tx);
-    let tray_handle = tray.spawn().await.expect("Failed to create system tray");
-
-    info!("System tray started");
-
-    let poll_interval = config.poll_interval();
-    run_poll_loop(provider, cmd_rx, poll_interval, tray_handle).await;
-
+    sni_event_loop(events, tray_handle).await;
     Ok(())
+}
+
+async fn sni_event_loop(
+    mut events: mpsc::Receiver<UsageEvent>,
+    tray_handle: ksni::Handle<TrkrTray>,
+) {
+    while let Some(event) = events.recv().await {
+        tray_handle
+            .update(|tray| tray.apply_event(&event))
+            .await;
+    }
+    // events channel closed: service was dropped. Shutdown the tray.
+    tray_handle.shutdown().await;
+    std::process::exit(0);
 }
