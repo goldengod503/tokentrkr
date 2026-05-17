@@ -6,6 +6,7 @@ mod polling;
 mod provider;
 mod icon;
 mod tray;
+mod usage;
 #[cfg(feature = "cosmic")]
 mod cosmic_app;
 
