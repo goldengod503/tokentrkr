@@ -13,6 +13,10 @@ const REFRESH_CHANNEL_CAPACITY: usize = 4;
 pub struct UsageHandle {
     pub events: mpsc::Receiver<UsageEvent>,
     pub refresh: mpsc::Sender<()>,
+    /// Test-only: lets the receiver-drop regression test await actual
+    /// loop termination via `JoinHandle` instead of yield-counting.
+    #[cfg(test)]
+    pub(crate) task: tokio::task::JoinHandle<()>,
 }
 
 pub struct UsageService {
@@ -39,11 +43,13 @@ impl UsageService {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let (refresh_tx, refresh_rx) = mpsc::channel(REFRESH_CHANNEL_CAPACITY);
 
-        tokio::spawn(run_loop(self, event_tx, refresh_rx));
+        let _task = tokio::spawn(run_loop(self, event_tx, refresh_rx));
 
         UsageHandle {
             events: event_rx,
             refresh: refresh_tx,
+            #[cfg(test)]
+            task: _task,
         }
     }
 }
@@ -151,6 +157,10 @@ async fn do_one_fetch(
             }
             Err(e) if e.downcast_ref::<crate::provider::RateLimited>().is_some() => {
                 let retrying_in = delays.get(attempt).copied();
+                // This arm uses raw `emit()` instead of `emit_or_abort` because
+                // it must conditionally sleep-and-loop or return Transient
+                // *after* the emit — `emit_or_abort` collapses both into a
+                // single FetchOutcome and cannot express that.
                 if matches!(
                     emit(
                         events,
@@ -520,15 +530,19 @@ mod tests {
     }
 
     /// Regression: dropping the event receiver must stop the service loop.
-    /// Before the A1 fix, `emit()` swallowed `TrySendError::Closed` and
-    /// `run_loop` had no exit condition — after a COSMIC subscription
-    /// restart the spawned task continued calling `fetch_usage` forever
-    /// against a closed channel.
+    /// Before the A1 fix in release `2026-05-17_003`, `emit()` swallowed
+    /// `TrySendError::Closed` and `run_loop` had no exit condition — after
+    /// a COSMIC subscription restart the spawned task continued calling
+    /// `fetch_usage` forever against a closed channel.
+    ///
+    /// This test asserts termination structurally via the spawned task's
+    /// `JoinHandle` rather than counting `yield_now()` calls. Any refactor
+    /// that adds an `.await` between sleep-wake and the next emit will
+    /// still cause this test to fail if the loop fails to terminate within
+    /// one second of simulated time.
     #[tokio::test(start_paused = true)]
     async fn run_loop_exits_when_event_receiver_is_dropped() {
         let mock = MockProvider::new(vec![
-            MockOutcome::Ok,
-            MockOutcome::Ok,
             MockOutcome::Ok,
             MockOutcome::Ok,
             MockOutcome::Ok,
@@ -544,18 +558,23 @@ mod tests {
 
         drop(handle.events);
 
-        // Advance well past several poll intervals (5min × 10 = 50min).
-        // If run_loop kept polling, the mock would be called ~10 more times.
+        // Advance past the post-fetch sleep so the loop wakes and tries
+        // the next FetchStarted emit, which must observe ChannelClosed
+        // and return.
         tokio::time::advance(Duration::from_secs(50 * 60)).await;
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
 
-        // At most one extra call is possible (race between sleep waking and
-        // emit observing Closed); anything beyond that means the loop did
-        // not exit.
-        assert!(
-            mock.call_count() <= 2,
-            "expected ≤2 mock calls after receiver drop, got {}",
+        tokio::time::timeout(Duration::from_secs(1), handle.task)
+            .await
+            .expect("run_loop did not exit within 1s of receiver drop")
+            .expect("run_loop panicked");
+
+        // Exactly one fetch happened (the pre-drop cycle). The post-wake
+        // path observes ChannelClosed on the FetchStarted emit *before*
+        // calling `do_one_fetch`, so no second fetch is made.
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "expected exactly 1 mock call (pre-drop), got {}",
             mock.call_count()
         );
     }

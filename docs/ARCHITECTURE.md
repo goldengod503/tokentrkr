@@ -23,12 +23,12 @@ src/
   history.rs        194  30-day percent history with atomic JSON writes
   icon.rs           153  SVG icon rendering for SNI tray (vendored DejaVu Sans Bold)
   tray.rs           385  ksni-based SNI tray + apply_event(&UsageEvent)
-  cosmic_app.rs     858  libcosmic applet — popup + iced Subscription forwarder
+  cosmic_app.rs     878  libcosmic applet — popup + iced Subscription forwarder; UsageStreamUnavailable handler
   usage/                 orchestration core (extracted in A1)
     mod.rs            7    re-exports
     event.rs         66    UsageEvent enum (5 variants)
     retry.rs         54    RetryPolicy (10/30/60s ladder)
-    service.rs      592    UsageService::spawn() — fetch + retry + state machine + MockProvider; EmitResult signals ChannelClosed
+    service.rs      611    UsageService::spawn() — fetch + retry + state machine + MockProvider; EmitResult signals ChannelClosed; test-only JoinHandle on UsageHandle
 ```
 
 **Build targets.** Two: `cargo build` with default features pulls libcosmic
@@ -70,8 +70,16 @@ justifies it.
 an `EmitResult` of `Delivered` / `DroppedFull` / `ChannelClosed`. On
 `Full` it attempts a `Stalled` event (also `try_send`, may itself drop)
 and the loop keeps running. On `Closed` (receiver has been dropped) the
-loop returns immediately — that exit path closes the COSMIC
-subscription-restart leak documented in release doc `2026-05-17_003`.
+loop returns — that exit path closes the COSMIC subscription-restart
+leak documented in release doc `2026-05-17_003`.
+
+**Race:** a Full→Closed channel transition between the primary
+`try_send` and the `Stalled` `try_send` produces a `DroppedFull` return
+for what has become a `Closed` channel. Bounded to at most one
+additional `fetch_usage()` call before the next `emit` observes `Closed`
+and returns. Accepted as cheaper than the locking or retry that would
+close the race; see release doc `2026-05-17_004` for the decision.
+
 **Tradeoff:** under sustained UI render pressure, events can be dropped
 silently. Accepted because the alternative — blocking the loop on UI
 backpressure — is how the prior COSMIC subscription deadlocked (R2).
@@ -211,6 +219,38 @@ Each has a reopen trigger.
   reason about it per-fetch.
 - **Source:** 2026-05-17 architectural-analysis B3.
 
+### `UsageEvent::TransientError.retrying_in` is populated but unread
+- **Why deferred:** The retry ladder at `src/usage/service.rs:153-169`
+  faithfully populates `retrying_in: Option<Duration>` on every
+  `TransientError` emit, but both shells discard it via `..` patterns
+  (`src/cosmic_app.rs:320`, `src/tray.rs:31`). The compiler emits a
+  dead-code warning. The field exists as infrastructure for a future
+  "retrying in Xs" UI element that has not been built. Removing it now
+  is reversible churn — when the UI is added the field returns. Note:
+  the timeout arm at `src/usage/service.rs:130` emits `None` even
+  though the service will retry on the next poll cycle; that is a
+  semantic mismatch with the ladder-exhausted `None` which means
+  "no more retries" — clarify when the consumer is built.
+- **Reopen when:** A shell adds a "retrying in Xs" UI element, OR a
+  third release ships with the warning unconsumed.
+- **Source:** 2026-05-17 re-run architectural-analysis S1.
+
+### `FetchOutcome::Aborted` conflates network classification with loop-exit signal
+- **Why deferred:** `FetchOutcome` at `src/usage/service.rs:58-66` has
+  four variants: `Success`/`Transient`/`Permanent` classify the network
+  outcome; `Aborted` is a control-flow signal that the receiver was
+  dropped. The state-machine `match` at lines 99-103 silently swallows
+  `Aborted` via `(s, _) => s`, guarded only by the early `return` at
+  lines 95-97 firing first. A future exhaustive match over
+  `FetchOutcome` must remember this. Refactoring to
+  `Result<FetchOutcome, ()>` would touch ~6 return sites in
+  `do_one_fetch` for a type-level distinction that does not change
+  behavior — YAGNI at current scale.
+- **Reopen when:** A third use of `FetchOutcome::Aborted` is added, OR
+  the state machine grows past five variants, OR a second
+  control-flow-exit variant is needed.
+- **Source:** 2026-05-17 re-run architectural-analysis S3.
+
 ## Recent architectural changes
 
 ### 2026-05-16 → 2026-05-17: hardening pass
@@ -264,6 +304,35 @@ Driven by the architectural-analysis run on `src/usage/`. One merged branch:
   structs relocated from `main.rs` into `provider.rs` next to the
   `Provider` trait. Release doc `2026-05-17_003`. 41 unit tests pass
   on both build targets (was 39).
+
+### 2026-05-17: re-run architectural-analysis followups (A1 stuck-spinner recovery, A2 deterministic exit test, A3 try_send race note)
+
+Driven by the SECOND architectural-analysis run on `src/usage/`,
+focused on the post-A1/A2/A3 code introduced above. One merged branch:
+
+- `fix/usage-rerun-A1-A2-A3` — **A1** (R1, Medium): new
+  `Message::UsageStreamUnavailable` variant emitted once by the COSMIC
+  subscription closure's `take()-returned-None` branch before idling.
+  `update()` clears `refreshing`, `fetch_done`, `pending_snapshot` and
+  surfaces a "restart applet" error. Closes the permanent stuck-spinner
+  + 20Hz timer-burn path identified by the rerun's B4/B5 findings.
+  **A2** (R2, Medium): `UsageHandle` gains a `#[cfg(test)] task: JoinHandle<()>`
+  field; `run_loop_exits_when_event_receiver_is_dropped` now asserts
+  termination structurally via `tokio::time::timeout(1s, handle.task)`
+  + `assert_eq!(call_count, 1)` instead of yield-counting. The A1 leak
+  regression guard is no longer brittle to refactors that add `.await`
+  points in the loop. **A3** (R3, Low): ARCHITECTURE.md "try_send +
+  Stalled" Intentional decision amended with a Race paragraph noting
+  the Full→Closed TOCTOU and its one-iteration bound (this doc).
+  Release doc `2026-05-17_004`.
+
+  Also: inline comment at `src/usage/service.rs:152` explaining why
+  the `RateLimited` arm uses raw `emit()` instead of `emit_or_abort`
+  (S2 from the rerun, deferred to comment-only per architect).
+
+  41 unit tests pass on both build targets; net structural delta is
+  ~14 lines in `cosmic_app.rs` (variant + handler) and ~20 lines in
+  `service.rs` (test rewrite + cfg(test) field).
 
 ## Out of scope for this doc
 

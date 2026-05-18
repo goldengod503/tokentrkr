@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run_sni(provider: Arc<dyn Provider>, poll_interval: Duration) -> anyhow::Result<()> {
-    let UsageHandle { events, refresh } = UsageService::new(provider, poll_interval).spawn();
+    let UsageHandle { events, refresh, .. } = UsageService::new(provider, poll_interval).spawn();
 
     let tray = TrkrTray::new(refresh);
     let tray_handle: ksni::Handle<TrkrTray> = tray.spawn().await.expect("Failed to create system tray");
