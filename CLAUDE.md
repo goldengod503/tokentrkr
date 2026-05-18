@@ -2,7 +2,7 @@
 
 Rust system-tray applet that tracks Claude usage quotas. Two build targets: COSMIC native applet (default) and SNI tray (no-default-features).
 
-**Last verified against commit:** 56a4055 (2026-05-17)
+**Last verified against commit:** 037298c (2026-05-17)
 
 See `docs/ARCHITECTURE.md` for the full structural map, intentional decisions, known-deferred issues, and recent architectural changes. That doc is the authoritative architectural reference; this file is the per-session context loaded into every Claude Code conversation.
 

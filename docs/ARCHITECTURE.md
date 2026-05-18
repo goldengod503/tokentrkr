@@ -6,7 +6,7 @@ point of this doc is to give future architectural reviews a baseline to
 compare against — findings that contradict a stated decision here must
 argue against the doc rather than against a vacuum.
 
-**Last verified against commit:** 56a4055 (2026-05-17, A1/A2/A3 followups merged)
+**Last verified against commit:** 037298c (2026-05-17, rerun A1/A2/A3 followups merged)
 **Inputs:** `.code-review/REVIEW.md` (2026-05-16) + architectural-analysis
 recommendations A1–A7 (2026-05-17, output not retained on disk; A1 and A2
 shipped per `docs/correctness/releases/`).
