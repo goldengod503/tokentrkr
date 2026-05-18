@@ -59,6 +59,17 @@ enum FetchOutcome {
     Success,
     Transient,
     Permanent,
+    /// The event receiver was dropped mid-fetch. The caller should stop
+    /// the run loop rather than continue making network calls into a
+    /// closed channel.
+    Aborted,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EmitResult {
+    Delivered,
+    DroppedFull,
+    ChannelClosed,
 }
 
 async fn run_loop(
@@ -72,9 +83,18 @@ async fn run_loop(
     loop {
         while let Ok(()) = refresh_rx.try_recv() {}
 
-        emit(&events, UsageEvent::FetchStarted { fetch_id });
+        if matches!(
+            emit(&events, UsageEvent::FetchStarted { fetch_id }),
+            EmitResult::ChannelClosed
+        ) {
+            return;
+        }
         let outcome = do_one_fetch(&service, fetch_id, &events).await;
         fetch_id += 1;
+
+        if matches!(outcome, FetchOutcome::Aborted) {
+            return;
+        }
 
         state = match (state, outcome) {
             (_, FetchOutcome::Permanent) => State::Dormant,
@@ -107,7 +127,7 @@ async fn do_one_fetch(
         ).await {
             Ok(r) => r,
             Err(_elapsed) => {
-                emit(
+                return emit_or_abort(
                     events,
                     UsageEvent::TransientError {
                         fetch_id,
@@ -117,63 +137,103 @@ async fn do_one_fetch(
                         ),
                         retrying_in: None,
                     },
+                    FetchOutcome::Transient,
                 );
-                return FetchOutcome::Transient;
             }
         };
         match fetch_result {
             Ok(snapshot) => {
-                emit(events, UsageEvent::Snapshot { fetch_id, snapshot });
-                return FetchOutcome::Success;
-            }
-            Err(e) if e.downcast_ref::<crate::RateLimited>().is_some() => {
-                let retrying_in = delays.get(attempt).copied();
-                emit(
+                return emit_or_abort(
                     events,
-                    UsageEvent::TransientError {
-                        fetch_id,
-                        message: format!("{:#}", e),
-                        retrying_in,
-                    },
+                    UsageEvent::Snapshot { fetch_id, snapshot },
+                    FetchOutcome::Success,
                 );
+            }
+            Err(e) if e.downcast_ref::<crate::provider::RateLimited>().is_some() => {
+                let retrying_in = delays.get(attempt).copied();
+                if matches!(
+                    emit(
+                        events,
+                        UsageEvent::TransientError {
+                            fetch_id,
+                            message: format!("{:#}", e),
+                            retrying_in,
+                        },
+                    ),
+                    EmitResult::ChannelClosed,
+                ) {
+                    return FetchOutcome::Aborted;
+                }
                 if let Some(d) = retrying_in {
                     tokio::time::sleep(d).await;
                 } else {
                     return FetchOutcome::Transient;
                 }
             }
-            Err(e) if e.downcast_ref::<crate::Unauthorized>().is_some() => {
-                emit(
+            Err(e) if e.downcast_ref::<crate::provider::Unauthorized>().is_some() => {
+                return emit_or_abort(
                     events,
                     UsageEvent::PermanentError {
                         fetch_id,
                         message: format!("{:#}", e),
                     },
+                    FetchOutcome::Permanent,
                 );
-                return FetchOutcome::Permanent;
+            }
+            Err(e) if e.downcast_ref::<crate::provider::EmptyResponse>().is_some() => {
+                // EmptyResponse means the API is structurally responsive but
+                // returning no usable data. Treat as Permanent so the state
+                // machine drops to the 15-min Dormant retry instead of
+                // churning at poll_interval forever.
+                return emit_or_abort(
+                    events,
+                    UsageEvent::PermanentError {
+                        fetch_id,
+                        message: format!("{:#}", e),
+                    },
+                    FetchOutcome::Permanent,
+                );
             }
             Err(e) => {
-                emit(
+                return emit_or_abort(
                     events,
                     UsageEvent::TransientError {
                         fetch_id,
                         message: format!("{:#}", e),
                         retrying_in: None,
                     },
+                    FetchOutcome::Transient,
                 );
-                return FetchOutcome::Transient;
             }
         }
     }
     FetchOutcome::Transient
 }
 
-fn emit(tx: &mpsc::Sender<UsageEvent>, event: UsageEvent) {
+fn emit(tx: &mpsc::Sender<UsageEvent>, event: UsageEvent) -> EmitResult {
     // try_send is intentional: never block the loop on UI backpressure.
     // On Full, surface a Stalled marker (also try_send — may itself be
     // dropped). This is the R2 fix.
-    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
-        let _ = tx.try_send(UsageEvent::Stalled);
+    // On Closed, signal the caller so run_loop can stop instead of
+    // continuing to make network calls into a dropped receiver.
+    match tx.try_send(event) {
+        Ok(()) => EmitResult::Delivered,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            let _ = tx.try_send(UsageEvent::Stalled);
+            EmitResult::DroppedFull
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => EmitResult::ChannelClosed,
+    }
+}
+
+fn emit_or_abort(
+    tx: &mpsc::Sender<UsageEvent>,
+    event: UsageEvent,
+    fallback: FetchOutcome,
+) -> FetchOutcome {
+    match emit(tx, event) {
+        EmitResult::ChannelClosed => FetchOutcome::Aborted,
+        _ => fallback,
     }
 }
 
@@ -201,6 +261,7 @@ mod tests {
         Ok,
         RateLimited,
         Unauthorized,
+        EmptyResponse,
         Other(&'static str),
     }
 
@@ -235,8 +296,9 @@ mod tests {
 
             match outcome {
                 MockOutcome::Ok => Ok(synthetic_snapshot()),
-                MockOutcome::RateLimited => bail!(crate::RateLimited),
-                MockOutcome::Unauthorized => bail!(crate::Unauthorized),
+                MockOutcome::RateLimited => bail!(crate::provider::RateLimited),
+                MockOutcome::Unauthorized => bail!(crate::provider::Unauthorized),
+                MockOutcome::EmptyResponse => bail!(crate::provider::EmptyResponse),
                 MockOutcome::Other(msg) => bail!("{}", msg),
             }
         }
@@ -268,9 +330,9 @@ mod tests {
 
         assert!(mock.fetch_usage().await.is_ok());
         let e1 = mock.fetch_usage().await.unwrap_err();
-        assert!(e1.downcast_ref::<crate::RateLimited>().is_some());
+        assert!(e1.downcast_ref::<crate::provider::RateLimited>().is_some());
         let e2 = mock.fetch_usage().await.unwrap_err();
-        assert!(e2.downcast_ref::<crate::Unauthorized>().is_some());
+        assert!(e2.downcast_ref::<crate::provider::Unauthorized>().is_some());
         assert_eq!(mock.call_count(), 3);
     }
 
@@ -455,5 +517,76 @@ mod tests {
             }
             tokio::time::advance(Duration::from_secs(301)).await;
         }
+    }
+
+    /// Regression: dropping the event receiver must stop the service loop.
+    /// Before the A1 fix, `emit()` swallowed `TrySendError::Closed` and
+    /// `run_loop` had no exit condition — after a COSMIC subscription
+    /// restart the spawned task continued calling `fetch_usage` forever
+    /// against a closed channel.
+    #[tokio::test(start_paused = true)]
+    async fn run_loop_exits_when_event_receiver_is_dropped() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::Ok,
+            MockOutcome::Ok,
+            MockOutcome::Ok,
+            MockOutcome::Ok,
+            MockOutcome::Ok,
+        ]);
+        let service = UsageService::new(mock.clone(), Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // Drain one fetch cycle so the task is sleeping on the post-fetch
+        // select! when we drop the receiver.
+        let _ = handle.events.recv().await.expect("FetchStarted");
+        let _ = handle.events.recv().await.expect("Snapshot");
+        assert_eq!(mock.call_count(), 1);
+
+        drop(handle.events);
+
+        // Advance well past several poll intervals (5min × 10 = 50min).
+        // If run_loop kept polling, the mock would be called ~10 more times.
+        tokio::time::advance(Duration::from_secs(50 * 60)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // At most one extra call is possible (race between sleep waking and
+        // emit observing Closed); anything beyond that means the loop did
+        // not exit.
+        assert!(
+            mock.call_count() <= 2,
+            "expected ≤2 mock calls after receiver drop, got {}",
+            mock.call_count()
+        );
+    }
+
+    /// EmptyResponse must drop the service to Dormant so it stops polling
+    /// at the normal cadence. The state machine has no other path to limit
+    /// the retry rate for a structurally-responsive-but-empty upstream.
+    #[tokio::test(start_paused = true)]
+    async fn empty_response_emits_permanent_error_then_no_normal_poll() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::EmptyResponse,
+            MockOutcome::Ok, // would be served if loop kept polling normally
+        ]);
+        let service = UsageService::new(mock.clone(), Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // FetchStarted (fetch_id 0)
+        let _ = handle.events.recv().await.unwrap();
+        // PermanentError
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::PermanentError { fetch_id: 0, .. } => {}
+            other => panic!("expected PermanentError, got {:?}", other),
+        }
+
+        // Advance 10 minutes — well past the 5min normal poll, far short of
+        // the 15min dormant interval.
+        tokio::time::advance(Duration::from_secs(600)).await;
+
+        let next = tokio::time::timeout(Duration::from_millis(50), handle.events.recv()).await;
+        assert!(next.is_err(), "expected no event in dormant state, got {:?}", next);
+
+        assert_eq!(mock.call_count(), 1);
     }
 }

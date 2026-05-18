@@ -217,11 +217,11 @@ impl ClaudeProvider {
             let body = resp.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 warn!("429 response — retry-after: {:?}, body: {}", retry_after, body);
-                bail!(crate::RateLimited);
+                bail!(crate::provider::RateLimited);
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 warn!("401 response — body: {}", body);
-                bail!(crate::Unauthorized);
+                bail!(crate::provider::Unauthorized);
             }
             bail!("Usage API request failed ({}): {}", status, body);
         }
@@ -266,7 +266,7 @@ impl Provider for ClaudeProvider {
         let creds = outcome.creds();
         let api_resp = match self.fetch_usage_api(&creds.access_token).await {
             Ok(resp) => resp,
-            Err(e) if e.downcast_ref::<crate::RateLimited>().is_some() => {
+            Err(e) if e.downcast_ref::<crate::provider::RateLimited>().is_some() => {
                 if outcome.was_refreshed() {
                     // Token was just refreshed this call — 429 is a genuine
                     // rate-limit, not a stale-token symptom. Burning another
@@ -330,7 +330,7 @@ impl Provider for ClaudeProvider {
             && model_windows.is_empty()
             && extra.is_none()
         {
-            bail!(crate::EmptyResponse);
+            bail!(crate::provider::EmptyResponse);
         }
 
         if let Some(ref p) = primary {
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn unauthorized_sentinel_renders_user_facing_message() {
         assert_eq!(
-            crate::Unauthorized.to_string(),
+            crate::provider::Unauthorized.to_string(),
             "Authentication failed — re-login in Claude Code"
         );
     }
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn empty_response_sentinel_renders_user_facing_message() {
         assert_eq!(
-            crate::EmptyResponse.to_string(),
+            crate::provider::EmptyResponse.to_string(),
             "Claude usage API returned no data"
         );
     }
