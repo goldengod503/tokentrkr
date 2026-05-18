@@ -123,6 +123,11 @@ pub enum Message {
     SelectTimeRange(TimeRange),
     CycleTrayMode,
     Surface(cosmic::surface::Action),
+    /// libcosmic restarted the usage subscription after the handle was
+    /// already consumed. The applet treats this as a terminal failure
+    /// for any in-flight fetch — clears spinner state and surfaces an
+    /// error — so the user is not stuck staring at a permanent spinner.
+    UsageStreamUnavailable,
 }
 
 fn bucket_color(pct: f64) -> cosmic::iced::Color {
@@ -571,7 +576,11 @@ impl cosmic::Application for TokenTrkrApplet {
 
                     let Some(mut handle) = handle_opt else {
                         // Already taken (subscription restarted unexpectedly).
-                        // Stay idle.
+                        // Notify the app once so it can clear any in-flight
+                        // spinner state, then stay idle. Without this signal
+                        // `refreshing` could stay true forever (only Snapshot
+                        // or error events clear it, and no events will arrive).
+                        _ = channel.send(Message::UsageStreamUnavailable).await;
                         loop {
                             tokio::time::sleep(Duration::from_secs(86400)).await;
                         }
@@ -663,6 +672,17 @@ impl cosmic::Application for TokenTrkrApplet {
                 return cosmic::task::message(cosmic::Action::Cosmic(
                     cosmic::app::Action::Surface(a),
                 ));
+            }
+            Message::UsageStreamUnavailable => {
+                // Treat as terminal failure for the current cycle: drop the
+                // spinner so SpinTick stops firing, discard any pending
+                // snapshot, and surface a visible error. Recovery requires
+                // restarting the applet — there is no path to re-acquire
+                // the handle from inside the running subscription.
+                self.refreshing = false;
+                self.fetch_done = false;
+                self.pending_snapshot = None;
+                self.error = Some("Usage stream unavailable (restart applet)".into());
             }
         }
         Task::none()
