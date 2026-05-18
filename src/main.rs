@@ -9,7 +9,6 @@ mod usage;
 #[cfg(feature = "cosmic")]
 mod cosmic_app;
 
-use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -22,46 +21,6 @@ use crate::provider::Provider;
 use crate::tray::TrkrTray;
 use crate::usage::{UsageEvent, UsageHandle, UsageService};
 use ksni::TrayMethods;
-
-/// Sentinel error for 429 responses so the polling loop can retry with backoff.
-#[derive(Debug)]
-pub struct RateLimited;
-
-impl fmt::Display for RateLimited {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Rate limited (429)")
-    }
-}
-
-impl std::error::Error for RateLimited {}
-
-/// Sentinel error for 401 responses. Distinct from `RateLimited` so the
-/// polling loop does not retry — credentials are revoked or invalid and
-/// the user must re-authenticate.
-#[derive(Debug)]
-pub struct Unauthorized;
-
-impl fmt::Display for Unauthorized {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Authentication failed — re-login in Claude Code")
-    }
-}
-
-impl std::error::Error for Unauthorized {}
-
-/// Sentinel error for a structurally valid but semantically empty usage
-/// response (every field None / empty). Surfaced instead of silently
-/// writing 0% to the history chart.
-#[derive(Debug)]
-pub struct EmptyResponse;
-
-impl fmt::Display for EmptyResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Claude usage API returned no data")
-    }
-}
-
-impl std::error::Error for EmptyResponse {}
 
 fn is_cosmic() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP")
