@@ -1,1 +1,3 @@
 target/
+.codex
+docs/ARCHITECTURE-drift.json
