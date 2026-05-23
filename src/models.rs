@@ -98,9 +98,16 @@ pub struct TokenRefreshResponse {
 
 impl RateWindow {
     pub fn format_reset_time(&self) -> String {
+        self.format_reset_time_in(Utc::now(), &chrono::Local)
+    }
+
+    fn format_reset_time_in<Tz>(&self, now: DateTime<Utc>, tz: &Tz) -> String
+    where
+        Tz: chrono::TimeZone,
+        Tz::Offset: std::fmt::Display,
+    {
         match self.resets_at {
             Some(reset) => {
-                let now = Utc::now();
                 let duration = reset.signed_duration_since(now);
                 if duration.num_seconds() <= 0 {
                     return "Resetting soon...".to_string();
@@ -108,7 +115,10 @@ impl RateWindow {
                 let hours = duration.num_hours();
                 let minutes = duration.num_minutes() % 60;
                 if hours > 24 {
-                    reset.format("Resets %b %-d, %-I:%M %p").to_string()
+                    reset
+                        .with_timezone(tz)
+                        .format("Resets %b %-d, %-I:%M %p")
+                        .to_string()
                 } else if hours > 0 {
                     format!("Resets in {}h {}m", hours, minutes)
                 } else {
@@ -134,4 +144,34 @@ impl RateWindow {
         format!("{:<20} {:.0}% used", self.label, self.used_percent)
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    fn window_with_reset(reset: DateTime<Utc>) -> RateWindow {
+        RateWindow {
+            label: "test".into(),
+            used_percent: 50.0,
+            window_minutes: Some(10080),
+            resets_at: Some(reset),
+            reset_description: None,
+        }
+    }
+
+    #[test]
+    fn absolute_reset_time_is_rendered_in_supplied_timezone_not_utc() {
+        // 2026-05-30 02:00 UTC is 2026-05-29 22:00 in US Eastern (UTC-4) —
+        // crosses the calendar-day boundary so a UTC-vs-local bug is obvious.
+        let reset = Utc.with_ymd_and_hms(2026, 5, 30, 2, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 23, 0, 0, 0).unwrap();
+        let eastern = FixedOffset::west_opt(4 * 3600).unwrap();
+        let window = window_with_reset(reset);
+
+        let result = window.format_reset_time_in(now, &eastern);
+
+        assert_eq!(result, "Resets May 29, 10:00 PM");
+    }
 }
