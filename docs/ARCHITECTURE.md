@@ -170,6 +170,23 @@ Each has a reopen trigger.
   release that the existing unit tests don't catch.
 - **Source:** Release docs `2026-05-17_001` and `_002` Open Questions.
 
+### Credentials-file write race — cross-process
+- **Status:** CAS-lite guard shipped 2026-07-05. `write_credentials`
+  re-reads the on-disk `refreshToken` immediately before its atomic
+  rename and aborts (private `ExternalCredentialRotation` sentinel in
+  `claude.rs`) if it no longer matches the token the refresh consumed.
+  Recovery treats disk as authoritative: re-read only, never a second
+  refresh (the external pair is fresher; ours is orphaned).
+- **Why deferred (residual):** The guard shrinks the clobber window
+  from a full OAuth network round-trip to the microseconds between the
+  guard read and the rename — it does not eliminate it. Elimination
+  requires a cross-process coordination protocol with Claude Code,
+  which we do not own (system-architect scope, escalated in the
+  2026-06-10 core-review index).
+- **Reopen when:** A recorded clobber incident survives the guard.
+- **Source:** 2026-06-10 core review R1 (findings B5/C1); spec
+  `homelab2-docs/specs/tokentrkr/2026-06-10-credentials-toctou-guard.md`.
+
 ### Live `SetInterval` reconfiguration
 - **Why deferred:** The old `PollCommand::SetInterval(Duration)` was
   defined but never wired to any UI. Dropped in A1. A future

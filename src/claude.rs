@@ -18,6 +18,21 @@ pub struct ClaudeProvider {
     client: reqwest::Client,
 }
 
+/// Private sentinel: an external writer (Claude Code, `claude login`) rotated
+/// the credentials file between our read and our write-back. Never crosses the
+/// `Provider` boundary — recovery is fully internal to this module (re-read
+/// disk, discard our now-orphaned token pair).
+#[derive(Debug)]
+struct ExternalCredentialRotation;
+
+impl std::fmt::Display for ExternalCredentialRotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "credentials rotated externally during refresh")
+    }
+}
+
+impl std::error::Error for ExternalCredentialRotation {}
+
 /// Outcome of ensuring we have valid credentials.
 ///
 /// The distinction matters for 429 handling: a 429 *after* we just refreshed
@@ -72,7 +87,11 @@ impl ClaudeProvider {
             .context("No claudeAiOauth section in credentials file")
     }
 
-    fn write_credentials(&self, creds: &OAuthCredentials) -> Result<()> {
+    /// `consumed_refresh_token` is the refresh token this refresh exchanged
+    /// (and thereby invalidated — refresh tokens are single-use). If disk no
+    /// longer holds that token, an external writer rotated credentials during
+    /// our network round-trip and writing would clobber their fresher pair.
+    fn write_credentials(&self, creds: &OAuthCredentials, consumed_refresh_token: &str) -> Result<()> {
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -83,6 +102,8 @@ impl ClaudeProvider {
             oauth["accessToken"] = serde_json::Value::String(creds.access_token.clone());
             oauth["refreshToken"] = serde_json::Value::String(creds.refresh_token.clone());
             oauth["expiresAt"] = serde_json::Value::Number(creds.expires_at.into());
+        } else {
+            bail!("credentials file missing claudeAiOauth section during write");
         }
 
         let updated = serde_json::to_string_pretty(&raw)?;
@@ -102,6 +123,27 @@ impl ClaudeProvider {
                 .context("Failed to write credentials to temp file")?;
             f.sync_all()
                 .context("Failed to sync credentials temp file")?;
+        }
+
+        // CAS-lite guard: re-read the live file immediately before the rename.
+        // If its refreshToken is no longer the one this refresh consumed, an
+        // external writer landed during our read→rename window — abort rather
+        // than clobber. This shrinks the race window from a network round-trip
+        // to the microseconds between this read and the rename; it does not
+        // eliminate it. An unreadable/unparseable file is treated as rotation:
+        // when we can't confirm it's safe to clobber, we don't.
+        let on_disk_refresh_token = fs::read_to_string(&self.credentials_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| {
+                v.get("claudeAiOauth")
+                    .and_then(|o| o.get("refreshToken"))
+                    .and_then(|t| t.as_str())
+                    .map(str::to_owned)
+            });
+        if on_disk_refresh_token.as_deref() != Some(consumed_refresh_token) {
+            let _ = fs::remove_file(&tmp_path);
+            bail!(ExternalCredentialRotation);
         }
 
         fs::rename(&tmp_path, &self.credentials_path).with_context(|| {
@@ -178,10 +220,33 @@ impl ClaudeProvider {
             rate_limit_tier: creds.rate_limit_tier.clone(),
         };
 
-        self.write_credentials(&new_creds)?;
-        info!("Token refreshed successfully");
+        self.persist_refreshed_credentials(new_creds, &creds.refresh_token)
+    }
 
-        Ok(new_creds)
+    /// Persist just-refreshed credentials, treating an external rotation as a
+    /// re-read trigger — never a refresh trigger. Disk is authoritative: the
+    /// external writer's pair is fresher, and our just-received pair may
+    /// already be superseded server-side, so we discard ours rather than burn
+    /// another single-use refresh token chasing the race.
+    fn persist_refreshed_credentials(
+        &self,
+        new_creds: OAuthCredentials,
+        consumed_refresh_token: &str,
+    ) -> Result<OAuthCredentials> {
+        match self.write_credentials(&new_creds, consumed_refresh_token) {
+            Ok(()) => {
+                info!("Token refreshed successfully");
+                Ok(new_creds)
+            }
+            Err(e) if e.downcast_ref::<ExternalCredentialRotation>().is_some() => {
+                warn!(
+                    "Credentials rotated externally during refresh; \
+                     discarding our tokens and re-reading disk"
+                );
+                self.read_credentials()
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn ensure_fresh_credentials(&self) -> Result<CredentialsOutcome> {
@@ -388,7 +453,7 @@ mod tests {
         fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("seed mode");
 
         make_provider(&path)
-            .write_credentials(&make_creds())
+            .write_credentials(&make_creds(), "old")
             .expect("write");
 
         let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
@@ -492,6 +557,89 @@ mod tests {
     }
 
     #[test]
+    fn write_credentials_with_externally_rotated_token_aborts_without_clobbering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+        // Disk holds a pair from an external writer (Claude Code rotated
+        // credentials during our refresh round-trip) — not the token our
+        // refresh consumed ("old").
+        let external = r#"{"claudeAiOauth":{"accessToken":"cc_access","refreshToken":"cc_rotated","expiresAt":1800000000000}}"#;
+        fs::write(&path, external).expect("seed");
+
+        let err = make_provider(&path)
+            .write_credentials(&make_creds(), "old")
+            .expect_err("must abort");
+
+        assert!(err.downcast_ref::<ExternalCredentialRotation>().is_some());
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            external,
+            "external writer's file must survive untouched"
+        );
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "aborted write must not leave a temp file behind"
+        );
+    }
+
+    #[test]
+    fn write_credentials_missing_oauth_section_errors_without_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+        let original = r#"{"otherKey":"keep me"}"#;
+        fs::write(&path, original).expect("seed");
+
+        let result = make_provider(&path).write_credentials(&make_creds(), "old");
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).expect("read"), original);
+    }
+
+    #[test]
+    fn persist_after_external_rotation_returns_disk_creds_without_refreshing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+        fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"cc_access","refreshToken":"cc_rotated","expiresAt":1800000000000}}"#,
+        )
+        .expect("seed");
+
+        // Our refresh consumed "old", but disk was rotated to "cc_rotated"
+        // mid-flight. Recovery must be a re-read — never another refresh —
+        // and must discard our now-orphaned pair.
+        let effective = make_provider(&path)
+            .persist_refreshed_credentials(make_creds(), "old")
+            .expect("recovery");
+
+        assert_eq!(effective.access_token, "cc_access");
+        assert_eq!(effective.refresh_token, "cc_rotated");
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(on_disk["claudeAiOauth"]["refreshToken"], "cc_rotated");
+    }
+
+    #[test]
+    fn persist_with_unrotated_disk_writes_and_returns_our_creds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+        fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"old","expiresAt":0}}"#,
+        )
+        .expect("seed");
+
+        let effective = make_provider(&path)
+            .persist_refreshed_credentials(make_creds(), "old")
+            .expect("persist");
+
+        assert_eq!(effective.access_token, "test_access");
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(on_disk["claudeAiOauth"]["refreshToken"], "test_refresh");
+    }
+
+    #[test]
     fn write_credentials_preserves_unrelated_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(".credentials.json");
@@ -503,7 +651,7 @@ mod tests {
         .expect("seed");
 
         make_provider(&path)
-            .write_credentials(&make_creds())
+            .write_credentials(&make_creds(), "old")
             .expect("write");
 
         let value: serde_json::Value =
