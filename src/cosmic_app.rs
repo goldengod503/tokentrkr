@@ -682,6 +682,10 @@ impl cosmic::Application for TokenTrkrApplet {
                 self.refreshing = false;
                 self.fetch_done = false;
                 self.pending_snapshot = None;
+                // The service loop is gone; a retained sender would make the
+                // Refresh button a permanent silent no-op. Dropping it lets
+                // RefreshNow's Some-guard reflect reality.
+                self.refresh_tx = None;
                 self.error = Some("Usage stream unavailable (restart applet)".into());
             }
         }
