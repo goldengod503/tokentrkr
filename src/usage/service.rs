@@ -34,11 +34,6 @@ impl UsageService {
         }
     }
 
-    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
-        self.retry = retry;
-        self
-    }
-
     pub fn spawn(self) -> UsageHandle {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let (refresh_tx, refresh_rx) = mpsc::channel(REFRESH_CHANNEL_CAPACITY);
