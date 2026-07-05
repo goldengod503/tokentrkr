@@ -32,7 +32,13 @@ impl TrkrTray {
             | UsageEvent::PermanentError { message, .. } => {
                 self.error = Some(message.clone());
             }
-            UsageEvent::FetchStarted { .. } | UsageEvent::Stalled => {}
+            // A new fetch beginning means the service is actively retrying —
+            // clear the stale error so the tooltip doesn't show "rate
+            // limited" as if it were terminal for the whole ladder+poll wait.
+            UsageEvent::FetchStarted { .. } => {
+                self.error = None;
+            }
+            UsageEvent::Stalled => {}
         }
     }
 
@@ -373,13 +379,29 @@ mod tests {
     }
 
     #[test]
-    fn fetch_started_and_stalled_are_no_ops() {
+    fn stalled_is_a_no_op() {
         let mut t = make_tray();
         t.snapshot = None;
-        t.error = None;
-        t.apply_event(&UsageEvent::FetchStarted { fetch_id: 0 });
-        assert!(t.snapshot.is_none() && t.error.is_none());
+        t.error = Some("kept".into());
+
         t.apply_event(&UsageEvent::Stalled);
-        assert!(t.snapshot.is_none() && t.error.is_none());
+
+        assert!(t.snapshot.is_none());
+        assert_eq!(t.error.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn fetch_started_after_transient_error_clears_stale_error() {
+        let mut t = make_tray();
+        t.apply_event(&UsageEvent::TransientError {
+            fetch_id: 0,
+            message: "rate limited".into(),
+            retrying_in: None,
+        });
+
+        t.apply_event(&UsageEvent::FetchStarted { fetch_id: 1 });
+
+        assert!(t.error.is_none(), "retry in flight must clear the stale error");
+        assert!(t.snapshot.is_none(), "snapshot untouched by FetchStarted");
     }
 }
