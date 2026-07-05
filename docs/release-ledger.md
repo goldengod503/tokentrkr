@@ -16,4 +16,4 @@ Specs: `homelab2-docs/specs/tokentrkr/2026-06-10-core-review-INDEX.md`
 | Credentials TOCTOU guard (R1 + B2) | High | Done | [2026-07-05_001](correctness/releases/2026-07-05_001_credentials-toctou-guard.md) |
 | Retry-after propagation (R3) | Medium | Done | [2026-07-05_002](correctness/releases/2026-07-05_002_retry-after-propagation.md) |
 | State & UI completeness (R5/R6/R8) | Low | Done | [2026-07-05_003](correctness/releases/2026-07-05_003_state-ui-completeness.md) |
-| Core housekeeping (R9/R10/R11) | Low | In Progress | Option A chosen by Peter 2026-07-05; spec `2026-06-10-core-housekeeping.md` |
+| Core housekeeping (R9/R10/R11) | Low | Done | [2026-07-05_004](correctness/releases/2026-07-05_004_core-housekeeping.md) — Option A per Peter |

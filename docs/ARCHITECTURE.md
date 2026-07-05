@@ -161,6 +161,22 @@ would emit a "retrying in X" that misstates the real wait
 "COSMIC and SNI share one retry policy" decision above is preserved by
 construction. See release doc `2026-07-05_002`.
 
+### Single timeout authority: reqwest primary, 45s outer backstop
+
+Two layers time out one fetch attempt. reqwest's client timeout (30s
+request / 10s connect, `claude.rs`) is the **primary** authority for
+production fetches. `RetryPolicy.fetch_timeout` (45s) is a deliberate
+**backstop** just above the reqwest ceiling — it exists to bound a
+`Provider` with no internal timeout (`MockProvider` in tests, or a
+future impl that forgets a client timeout), not to fire in production.
+Chosen over deleting the outer timeout entirely (Option B) to keep the
+test/mock bound; decision by Peter 2026-07-05. If either value moves,
+preserve `fetch_timeout > reqwest timeout` — inverting the order
+silently changes which layer owns timeouts (the R9 drift trap this
+decision exists to prevent). The `default_fetch_timeout_is_a_backstop_
+above_the_reqwest_ceiling` test enforces the margin. See release doc
+`2026-07-05_004`.
+
 ## Known-deferred issues
 
 Items we have evidence for but consciously chose not to address now.
@@ -235,16 +251,16 @@ Each has a reopen trigger.
   catch on drift. Reopen if thresholds change.
 
 ### A4 — `RetryPolicy` public surface (zero external callers)
-- **Why deferred:** The 2026-05-17 architectural-analysis on `src/usage/`
-  flagged `with_retry()` as a builder with no callers and `RetryPolicy`
-  as having `pub` fields with no invariant guard. The fix (delete
-  `with_retry`, demote fields to `pub(crate)`) is a deletion, but
-  bundling it with the A1/A2/A3 PR would have grown blast radius for
-  no current friction. The single dead-code warning on `with_retry`
-  is accepted.
+- **Partially taken 2026-07-05 (R10):** the confirmed-dead subset —
+  `with_retry()` and the `pub use retry::RetryPolicy` re-export — is
+  deleted; their two dead-code warnings are gone.
+- **Still deferred:** demoting `RetryPolicy` fields to `pub(crate)`.
+  The original trigger has not fired.
 - **Reopen when:** Any caller outside `usage/` constructs a
-  `RetryPolicy` or calls `with_retry()`.
-- **Source:** 2026-05-17 architectural-analysis A4.
+  `RetryPolicy` (the `with_retry` half of the old trigger is moot —
+  it no longer exists).
+- **Source:** 2026-05-17 architectural-analysis A4; release doc
+  `2026-07-05_004`.
 
 ### `Stalled` does not carry a `fetch_id`
 - **Why deferred:** The 2026-05-17 architectural-analysis identified a
