@@ -179,6 +179,72 @@ fn progress_bar_fill(color: cosmic::iced::Color) -> impl Fn(&Theme) -> container
     }
 }
 
+/// Fritsch–Carlson monotone cubic spline → SVG path `d` string.
+/// Guarantees the curve never overshoots the input samples, so a percentage
+/// series is never drawn below its min or above its max (no fabricated peaks
+/// or valleys between readings — required for an honest quota gauge).
+fn smooth_path(pts: &[(f64, f64)]) -> String {
+    let n = pts.len();
+    if n == 0 {
+        return String::new();
+    }
+    if n == 1 {
+        return format!("M {:.1} {:.1}", pts[0].0, pts[0].1);
+    }
+
+    // Secant slopes between consecutive points.
+    let mut d = vec![0.0_f64; n - 1];
+    for i in 0..n - 1 {
+        let dx = pts[i + 1].0 - pts[i].0;
+        d[i] = if dx == 0.0 { 0.0 } else { (pts[i + 1].1 - pts[i].1) / dx };
+    }
+
+    // Tangents: endpoints use the adjacent secant; interior averages neighbors,
+    // flattened to zero at local extrema (sign change or flat secant).
+    let mut m = vec![0.0_f64; n];
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for i in 1..n - 1 {
+        m[i] = if d[i - 1] * d[i] <= 0.0 {
+            0.0
+        } else {
+            (d[i - 1] + d[i]) / 2.0
+        };
+    }
+
+    // Fritsch–Carlson monotonicity clamp.
+    for i in 0..n - 1 {
+        if d[i] == 0.0 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+        } else {
+            let a = m[i] / d[i];
+            let b = m[i + 1] / d[i];
+            let s = a * a + b * b;
+            if s > 9.0 {
+                let tau = 3.0 / s.sqrt();
+                m[i] = tau * a * d[i];
+                m[i + 1] = tau * b * d[i];
+            }
+        }
+    }
+
+    // Emit cubic Bézier segments from Hermite tangents.
+    let mut out = format!("M {:.1} {:.1}", pts[0].0, pts[0].1);
+    for i in 0..n - 1 {
+        let dx = pts[i + 1].0 - pts[i].0;
+        let c1x = pts[i].0 + dx / 3.0;
+        let c1y = pts[i].1 + m[i] * dx / 3.0;
+        let c2x = pts[i + 1].0 - dx / 3.0;
+        let c2y = pts[i + 1].1 - m[i + 1] * dx / 3.0;
+        out.push_str(&format!(
+            " C {:.1} {:.1}, {:.1} {:.1}, {:.1} {:.1}",
+            c1x, c1y, c2x, c2y, pts[i + 1].0, pts[i + 1].1
+        ));
+    }
+    out
+}
+
 fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     let w = 280.0_f64;
     let h = 130.0_f64;
@@ -878,5 +944,74 @@ impl TokenTrkrApplet {
         );
 
         self.core.applet.popup_container(col).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Walk an SVG path `d` string, returning every anchor/control-point Y.
+    /// Handles the `M x y` and `C c1x c1y, c2x c2y, x y` commands this module emits.
+    fn path_ys(d: &str) -> Vec<f64> {
+        let toks: Vec<&str> = d.split([' ', ',']).filter(|t| !t.is_empty()).collect();
+        let mut ys = Vec::new();
+        let mut i = 0;
+        while i < toks.len() {
+            match toks[i] {
+                "M" => {
+                    ys.push(toks[i + 2].parse().expect("M y"));
+                    i += 3;
+                }
+                "C" => {
+                    for k in [2usize, 4, 6] {
+                        ys.push(toks[i + k].parse().expect("C y"));
+                    }
+                    i += 7;
+                }
+                _ => i += 1,
+            }
+        }
+        ys
+    }
+
+    #[test]
+    fn smoothing_a_spiky_series_never_overshoots_input_range() {
+        let pts = vec![
+            (0.0, 50.0),
+            (10.0, 10.0),
+            (20.0, 90.0),
+            (30.0, 12.0),
+            (40.0, 88.0),
+        ];
+        let min = 10.0_f64;
+        let max = 90.0_f64;
+
+        let d = smooth_path(&pts);
+
+        for y in path_ys(&d) {
+            assert!(
+                y >= min - 0.05 && y <= max + 0.05,
+                "control point y={y} escaped input range [{min}, {max}]"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_multiple_points_emits_cubic_path_with_no_nan() {
+        let pts = vec![(0.0, 5.0), (10.0, 40.0), (20.0, 35.0), (30.0, 80.0)];
+
+        let d = smooth_path(&pts);
+
+        assert!(d.starts_with("M "));
+        assert!(d.contains(" C "));
+        assert!(!d.contains("NaN") && !d.contains("inf"));
+    }
+
+    #[test]
+    fn smoothing_a_single_point_emits_only_a_moveto() {
+        let d = smooth_path(&[(3.0, 7.0)]);
+
+        assert_eq!(d, "M 3.0 7.0");
     }
 }
