@@ -105,6 +105,14 @@ async fn run_loop(
         state = match (state, outcome) {
             (_, FetchOutcome::Permanent) => State::Dormant,
             (State::Dormant, FetchOutcome::Success) => State::Normal,
+            // A transient outcome (429/timeout) means the server was
+            // reachable, contradicting the auth/empty condition that
+            // justified Dormant — return to Normal cadence and let the
+            // ladder/poll handle the transient. Without this arm a 429 on
+            // the recovery poll re-applied the full 15-min dormant wait
+            // (~30 min total to recover). Aborted never reaches here (the
+            // early return above fires first).
+            (State::Dormant, FetchOutcome::Transient) => State::Normal,
             (s, _) => s,
         };
 
@@ -595,6 +603,64 @@ mod tests {
                 other => panic!("expected Snapshot({}), got {:?}", expected_id, other),
             }
             tokio::time::advance(Duration::from_secs(301)).await;
+        }
+    }
+
+    /// A transient error on the dormant recovery poll must return the
+    /// service to Normal cadence — the server answering (even with a 429)
+    /// contradicts the condition that justified Dormant. Before the R5 fix
+    /// the catch-all kept Dormant and the user waited a second full 15-min
+    /// interval (~30 min total to recover).
+    #[tokio::test(start_paused = true)]
+    async fn transient_error_during_dormant_recovery_returns_to_normal_cadence() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::EmptyResponse,
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited,
+            MockOutcome::RateLimited, // exhausts the ladder → Transient outcome
+            MockOutcome::Ok,
+        ]);
+        let service = UsageService::new(mock.clone(), Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // Cycle 0: FetchStarted + PermanentError → Dormant.
+        let _ = handle.events.recv().await.unwrap();
+        let _ = handle.events.recv().await.unwrap();
+
+        // Cycle 1 fires after the 15-min dormant wait and exhausts the
+        // 429 ladder → Transient outcome.
+        tokio::time::advance(Duration::from_secs(15 * 60 + 1)).await;
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::FetchStarted { fetch_id: 1 } => {}
+            other => panic!("expected FetchStarted(1), got {:?}", other),
+        }
+        for expected_delay in [Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(60)] {
+            match handle.events.recv().await.unwrap() {
+                UsageEvent::TransientError { retrying_in: Some(d), .. } => {
+                    assert_eq!(d, expected_delay);
+                }
+                other => panic!("expected TransientError(Some), got {:?}", other),
+            }
+            tokio::time::advance(expected_delay + Duration::from_millis(10)).await;
+        }
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::TransientError { retrying_in: None, .. } => {}
+            other => panic!("expected TransientError(None), got {:?}", other),
+        }
+
+        // The Transient outcome must have flipped Dormant → Normal: the
+        // next poll comes at poll_interval (300s), not dormant (900s).
+        // The timeout bounds paused-clock auto-advance so a still-Dormant
+        // loop (bug) yields Err here instead of silently fast-forwarding.
+        tokio::time::advance(Duration::from_secs(301)).await;
+        let next = tokio::time::timeout(Duration::from_millis(50), handle.events.recv()).await;
+        match next {
+            Ok(Some(UsageEvent::FetchStarted { fetch_id: 2 })) => {}
+            other => panic!(
+                "expected FetchStarted(2) at normal cadence (Dormant not exited?), got {:?}",
+                other
+            ),
         }
     }
 

@@ -93,6 +93,15 @@ stop entirely (manual only) and 1-hour retry. 15 min catches the common
 "user re-ran `claude login`" recovery path with ~96 wasted 401s/day in
 the worst case (vs ~288 at 5 min). Accepted.
 
+Exit-on-Transient (added 2026-07-05, R5): a `Transient` outcome on the
+dormant recovery poll returns the service to `Normal` — the server
+answering (even with a 429) contradicts the auth/empty condition that
+justified Dormant. The Unauthorized→Dormant transition and its 15-min
+cadence are unchanged; without the exit arm a throttled recovery poll
+re-applied the full dormant wait (~30 min total to recover). `Aborted`
+still exits the loop before the state table. See release doc
+`2026-07-05_003`.
+
 ### COSMIC and SNI share one retry policy
 
 After A1, both shells consume the same `UsageEvent` stream and inherit
