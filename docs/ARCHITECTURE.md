@@ -137,6 +137,21 @@ trait, not at the crate root and not in a separate `errors` module.
 A new file is warranted only if a future error type is unrelated to
 `Provider` (e.g., a config-load sentinel). See release doc `2026-05-17_003`.
 
+### `RateLimited` carries `retry_after`; the ladder takes `max(ladder, hint)`
+
+The 429 sentinel is a payload struct: `RateLimited { retry_after:
+Option<Duration> }`. `ClaudeProvider` parses the `retry-after` header in
+RFC 9110 delta-seconds form only (HTTP-date and garbage → `None`) and
+caps it at the 15-minute dormant interval so a malformed or hostile
+header cannot park the fetch loop. The retry ladder in `do_one_fetch`
+waits `max(ladder_step, hint)` on in-ladder attempts — the ladder is a
+floor, never shortened by a small hint. On ladder exhaustion the hint is
+dropped (`retrying_in: None`, ordinary Transient): honoring it there
+would emit a "retrying in X" that misstates the real wait
+(X + poll_interval). Backoff logic stays entirely in `usage::` — the
+"COSMIC and SNI share one retry policy" decision above is preserved by
+construction. See release doc `2026-07-05_002`.
+
 ## Known-deferred issues
 
 Items we have evidence for but consciously chose not to address now.

@@ -282,7 +282,9 @@ impl ClaudeProvider {
             let body = resp.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 warn!("429 response — retry-after: {:?}, body: {}", retry_after, body);
-                bail!(crate::provider::RateLimited);
+                bail!(crate::provider::RateLimited {
+                    retry_after: parse_retry_after_secs(retry_after.as_deref()),
+                });
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 warn!("401 response — body: {}", body);
@@ -299,6 +301,16 @@ impl ClaudeProvider {
 
 fn parse_reset_time(s: &str) -> Option<DateTime<Utc>> {
     s.parse::<DateTime<Utc>>().ok()
+}
+
+/// Parse a `retry-after` header as RFC 9110 delta-seconds. The HTTP-date
+/// form and garbage both parse as `None` — the ladder applies unchanged.
+/// Capped at the dormant interval (15 min) so a malformed or hostile header
+/// can't park the fetch loop for an implausible wait.
+fn parse_retry_after_secs(value: Option<&str>) -> Option<std::time::Duration> {
+    const CAP_SECS: u64 = 15 * 60;
+    let secs = value?.trim().parse::<u64>().ok()?;
+    Some(std::time::Duration::from_secs(secs.min(CAP_SECS)))
 }
 
 fn sanitize_utilization(v: f64) -> f64 {
@@ -473,6 +485,37 @@ mod tests {
         assert_eq!(
             crate::provider::EmptyResponse.to_string(),
             "Claude usage API returned no data"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_accepts_delta_seconds() {
+        assert_eq!(
+            super::parse_retry_after_secs(Some("120")),
+            Some(std::time::Duration::from_secs(120))
+        );
+        assert_eq!(
+            super::parse_retry_after_secs(Some(" 30 ")),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_treats_garbage_and_http_dates_as_none() {
+        assert_eq!(super::parse_retry_after_secs(Some("soon")), None);
+        assert_eq!(
+            super::parse_retry_after_secs(Some("Fri, 05 Jul 2026 12:00:00 GMT")),
+            None
+        );
+        assert_eq!(super::parse_retry_after_secs(Some("-5")), None);
+        assert_eq!(super::parse_retry_after_secs(None), None);
+    }
+
+    #[test]
+    fn parse_retry_after_clamps_to_dormant_interval_cap() {
+        assert_eq!(
+            super::parse_retry_after_secs(Some("86400")),
+            Some(std::time::Duration::from_secs(900))
         );
     }
 

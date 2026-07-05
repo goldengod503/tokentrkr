@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::fmt;
+use std::time::Duration;
 
 use crate::models::UsageSnapshot;
 
@@ -12,8 +13,13 @@ pub trait Provider: Send + Sync {
 }
 
 /// Sentinel error for 429 responses so the polling loop can retry with backoff.
+/// Carries the server's `retry-after` hint when one was sent (delta-seconds
+/// form only, capped at parse time); the retry ladder takes
+/// `max(ladder_step, hint)` so a server asking for a longer wait is honored.
 #[derive(Debug)]
-pub struct RateLimited;
+pub struct RateLimited {
+    pub retry_after: Option<Duration>,
+}
 
 impl fmt::Display for RateLimited {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

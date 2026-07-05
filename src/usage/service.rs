@@ -156,7 +156,19 @@ async fn do_one_fetch(
                 );
             }
             Err(e) if e.downcast_ref::<crate::provider::RateLimited>().is_some() => {
-                let retrying_in = delays.get(attempt).copied();
+                let server_hint = e
+                    .downcast_ref::<crate::provider::RateLimited>()
+                    .and_then(|r| r.retry_after);
+                let ladder_step = delays.get(attempt).copied();
+                // Honor a server retry-after hint by waiting at least that
+                // long, but never less than the ladder step. Once the ladder
+                // is exhausted the hint is dropped too: emitting Some(hint)
+                // here would misstate the real wait (hint + poll_interval).
+                let retrying_in = match (ladder_step, server_hint) {
+                    (Some(l), Some(s)) => Some(l.max(s)),
+                    (Some(l), None) => Some(l),
+                    (None, _) => None,
+                };
                 // This arm uses raw `emit()` instead of `emit_or_abort` because
                 // it must conditionally sleep-and-loop or return Transient
                 // *after* the emit — `emit_or_abort` collapses both into a
@@ -270,6 +282,7 @@ mod tests {
     pub(super) enum MockOutcome {
         Ok,
         RateLimited,
+        RateLimitedWithHint(Duration),
         Unauthorized,
         EmptyResponse,
         Other(&'static str),
@@ -306,7 +319,12 @@ mod tests {
 
             match outcome {
                 MockOutcome::Ok => Ok(synthetic_snapshot()),
-                MockOutcome::RateLimited => bail!(crate::provider::RateLimited),
+                MockOutcome::RateLimited => {
+                    bail!(crate::provider::RateLimited { retry_after: None })
+                }
+                MockOutcome::RateLimitedWithHint(d) => {
+                    bail!(crate::provider::RateLimited { retry_after: Some(d) })
+                }
                 MockOutcome::Unauthorized => bail!(crate::provider::Unauthorized),
                 MockOutcome::EmptyResponse => bail!(crate::provider::EmptyResponse),
                 MockOutcome::Other(msg) => bail!("{}", msg),
@@ -426,6 +444,57 @@ mod tests {
         match handle.events.recv().await.unwrap() {
             UsageEvent::TransientError { retrying_in: None, .. } => {}
             other => panic!("expected TransientError(None), got {:?}", other),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_retry_after_hint_above_ladder_step_stretches_first_wait() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::RateLimitedWithHint(Duration::from_secs(120)),
+            MockOutcome::Ok,
+        ]);
+        let service = UsageService::new(mock.clone(), Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        // FetchStarted
+        let _ = handle.events.recv().await.unwrap();
+        // The hint (120s) beats the first ladder step (10s).
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::TransientError { retrying_in: Some(d), .. } => {
+                assert_eq!(d, Duration::from_secs(120));
+            }
+            other => panic!("expected TransientError(Some(120s)), got {:?}", other),
+        }
+
+        // The ladder step alone would have elapsed here — no retry yet.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert_eq!(mock.call_count(), 1, "retried before the server-requested wait");
+
+        tokio::time::advance(Duration::from_secs(110)).await;
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::Snapshot { fetch_id: 0, .. } => {}
+            other => panic!("expected Snapshot after honoring hint, got {:?}", other),
+        }
+        assert_eq!(mock.call_count(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_retry_after_hint_below_ladder_step_keeps_ladder_wait() {
+        let mock = MockProvider::new(vec![
+            MockOutcome::RateLimitedWithHint(Duration::from_secs(2)),
+            MockOutcome::Ok,
+        ]);
+        let service = UsageService::new(mock, Duration::from_secs(300));
+        let mut handle = service.spawn();
+
+        let _ = handle.events.recv().await.unwrap();
+
+        // max(ladder 10s, hint 2s) — the ladder floor wins.
+        match handle.events.recv().await.unwrap() {
+            UsageEvent::TransientError { retrying_in: Some(d), .. } => {
+                assert_eq!(d, Duration::from_secs(10));
+            }
+            other => panic!("expected TransientError(Some(10s)), got {:?}", other),
         }
     }
 
