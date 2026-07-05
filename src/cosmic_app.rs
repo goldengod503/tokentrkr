@@ -245,7 +245,7 @@ fn smooth_path(pts: &[(f64, f64)]) -> String {
     out
 }
 
-fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
+fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange, is_dark: bool) -> String {
     let w = 280.0_f64;
     let h = 130.0_f64;
     let pl = 30.0_f64; // padding left
@@ -255,6 +255,23 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     let cw = w - pl - pr;
     let ch = h - pt - pb;
 
+    let (grid, tick, label, ring) = if is_dark {
+        (
+            "rgba(255,255,255,0.1)",
+            "rgba(255,255,255,0.3)",
+            "rgba(255,255,255,0.42)",
+            "#21242b",
+        )
+    } else {
+        (
+            "rgba(20,28,40,0.1)",
+            "rgba(20,28,40,0.3)",
+            "rgba(20,28,40,0.5)",
+            "#f4f6fa",
+        )
+    };
+    let _ = ring; // consumed in Task 3 (endpoint dots)
+
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#
     );
@@ -263,18 +280,18 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     for &pct in &[0u32, 25, 50, 75, 100] {
         let y = pt + ch * (1.0 - pct as f64 / 100.0);
         svg.push_str(&format!(
-            r#"<line x1="{pl}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>"#,
+            r#"<line x1="{pl}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="{grid}" stroke-width="1"/>"#,
             x2 = w - pr
         ));
         svg.push_str(&format!(
-            r#"<text x="0" y="{:.1}" fill="rgba(255,255,255,0.4)" font-size="9" font-family="sans-serif">{pct}%</text>"#,
+            r#"<text x="0" y="{:.1}" fill="{label}" font-size="9" font-family="sans-serif">{pct}%</text>"#,
             y + 4.0
         ));
     }
 
     if points.len() < 2 {
         svg.push_str(&format!(
-            r#"<text x="{:.1}" y="{:.1}" fill="rgba(255,255,255,0.4)" font-size="11" font-family="sans-serif">No history data yet</text>"#,
+            r#"<text x="{:.1}" y="{:.1}" fill="{label}" font-size="11" font-family="sans-serif">No history data yet</text>"#,
             w / 2.0 - 40.0, h / 2.0 + 4.0
         ));
         svg.push_str("</svg>");
@@ -327,7 +344,7 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     for i in 0..=tick_count {
         let tick_time = now - chrono::Duration::seconds(range.seconds() - i as i64 * tick_interval_secs);
         let local = tick_time.with_timezone(&chrono::Local);
-        let label = match range {
+        let tick_label = match range {
             TimeRange::Hour1 | TimeRange::Hour6 | TimeRange::Day1 =>
                 format!("{:02}:{:02}", local.hour(), local.minute()),
             TimeRange::Day7 => {
@@ -339,12 +356,12 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
         let x = pl + (i as f64 / tick_count as f64) * cw;
         // tick mark
         svg.push_str(&format!(
-            r#"<line x1="{x:.1}" y1="{chart_bottom:.1}" x2="{x:.1}" y2="{tick_y2:.1}" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>"#
+            r#"<line x1="{x:.1}" y1="{chart_bottom:.1}" x2="{x:.1}" y2="{tick_y2:.1}" stroke="{tick}" stroke-width="1"/>"#
         ));
         // label — left-align first, right-align last, center others
         let anchor = if i == 0 { "start" } else if i == tick_count { "end" } else { "middle" };
         svg.push_str(&format!(
-            r#"<text x="{x:.1}" y="{label_y:.1}" fill="rgba(255,255,255,0.4)" font-size="8" font-family="sans-serif" text-anchor="{anchor}">{label}</text>"#
+            r#"<text x="{x:.1}" y="{label_y:.1}" fill="{label}" font-size="8" font-family="sans-serif" text-anchor="{anchor}">{tick_label}</text>"#
         ));
     }
 
@@ -893,8 +910,9 @@ impl TokenTrkrApplet {
             col = col.push(range_row);
 
             // SVG chart — rebuilds fresh every view call so range/data changes always render
+            let is_dark = cosmic::theme::active().cosmic().is_dark;
             let points = self.history.points_for_range(self.selected_range);
-            let svg_data = build_chart_svg(&points, self.selected_range);
+            let svg_data = build_chart_svg(&points, self.selected_range, is_dark);
             let svg_handle = widget::svg::Handle::from_memory(svg_data.into_bytes());
             col = col.push(
                 widget::Svg::new(svg_handle)
@@ -1013,5 +1031,42 @@ mod tests {
         let d = smooth_path(&[(3.0, 7.0)]);
 
         assert_eq!(d, "M 3.0 7.0");
+    }
+
+    fn sample_points() -> Vec<UsageDataPoint> {
+        let now = chrono::Utc::now();
+        (0..6)
+            .map(|i| UsageDataPoint {
+                timestamp: now - chrono::Duration::minutes((6 - i) * 30),
+                pct_5h: 10.0 + i as f64 * 12.0,
+                pct_7d: 40.0 + i as f64 * 2.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dark_and_light_themes_produce_different_grid_colors() {
+        let pts = sample_points();
+
+        let dark = build_chart_svg(&pts, TimeRange::Hour6, true);
+        let light = build_chart_svg(&pts, TimeRange::Hour6, false);
+
+        assert!(dark.contains("rgba(255,255,255,0.1)"));
+        assert!(light.contains("rgba(20,28,40,0.1)"));
+        assert_ne!(dark, light);
+    }
+
+    #[test]
+    fn too_few_points_renders_empty_state_with_theme_label_color() {
+        let one = vec![UsageDataPoint {
+            timestamp: chrono::Utc::now(),
+            pct_5h: 20.0,
+            pct_7d: 50.0,
+        }];
+
+        let light = build_chart_svg(&one, TimeRange::Hour6, false);
+
+        assert!(light.contains("No history data yet"));
+        assert!(light.contains("rgba(20,28,40,0.5)"));
     }
 }
