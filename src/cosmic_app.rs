@@ -179,7 +179,73 @@ fn progress_bar_fill(color: cosmic::iced::Color) -> impl Fn(&Theme) -> container
     }
 }
 
-fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
+/// Fritsch–Carlson monotone cubic spline → SVG path `d` string.
+/// Guarantees the curve never overshoots the input samples, so a percentage
+/// series is never drawn below its min or above its max (no fabricated peaks
+/// or valleys between readings — required for an honest quota gauge).
+fn smooth_path(pts: &[(f64, f64)]) -> String {
+    let n = pts.len();
+    if n == 0 {
+        return String::new();
+    }
+    if n == 1 {
+        return format!("M {:.1} {:.1}", pts[0].0, pts[0].1);
+    }
+
+    // Secant slopes between consecutive points.
+    let mut d = vec![0.0_f64; n - 1];
+    for i in 0..n - 1 {
+        let dx = pts[i + 1].0 - pts[i].0;
+        d[i] = if dx == 0.0 { 0.0 } else { (pts[i + 1].1 - pts[i].1) / dx };
+    }
+
+    // Tangents: endpoints use the adjacent secant; interior averages neighbors,
+    // flattened to zero at local extrema (sign change or flat secant).
+    let mut m = vec![0.0_f64; n];
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for i in 1..n - 1 {
+        m[i] = if d[i - 1] * d[i] <= 0.0 {
+            0.0
+        } else {
+            (d[i - 1] + d[i]) / 2.0
+        };
+    }
+
+    // Fritsch–Carlson monotonicity clamp.
+    for i in 0..n - 1 {
+        if d[i] == 0.0 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+        } else {
+            let a = m[i] / d[i];
+            let b = m[i + 1] / d[i];
+            let s = a * a + b * b;
+            if s > 9.0 {
+                let tau = 3.0 / s.sqrt();
+                m[i] = tau * a * d[i];
+                m[i + 1] = tau * b * d[i];
+            }
+        }
+    }
+
+    // Emit cubic Bézier segments from Hermite tangents.
+    let mut out = format!("M {:.1} {:.1}", pts[0].0, pts[0].1);
+    for i in 0..n - 1 {
+        let dx = pts[i + 1].0 - pts[i].0;
+        let c1x = pts[i].0 + dx / 3.0;
+        let c1y = pts[i].1 + m[i] * dx / 3.0;
+        let c2x = pts[i + 1].0 - dx / 3.0;
+        let c2y = pts[i + 1].1 - m[i + 1] * dx / 3.0;
+        out.push_str(&format!(
+            " C {:.1} {:.1}, {:.1} {:.1}, {:.1} {:.1}",
+            c1x, c1y, c2x, c2y, pts[i + 1].0, pts[i + 1].1
+        ));
+    }
+    out
+}
+
+fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange, is_dark: bool) -> String {
     let w = 280.0_f64;
     let h = 130.0_f64;
     let pl = 30.0_f64; // padding left
@@ -189,6 +255,21 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     let cw = w - pl - pr;
     let ch = h - pt - pb;
 
+    let (grid, tick, label, ring) = if is_dark {
+        (
+            "rgba(255,255,255,0.1)",
+            "rgba(255,255,255,0.3)",
+            "rgba(255,255,255,0.42)",
+            "#21242b",
+        )
+    } else {
+        (
+            "rgba(20,28,40,0.1)",
+            "rgba(20,28,40,0.3)",
+            "rgba(20,28,40,0.5)",
+            "#f4f6fa",
+        )
+    };
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#
     );
@@ -197,18 +278,18 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     for &pct in &[0u32, 25, 50, 75, 100] {
         let y = pt + ch * (1.0 - pct as f64 / 100.0);
         svg.push_str(&format!(
-            r#"<line x1="{pl}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>"#,
+            r#"<line x1="{pl}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="{grid}" stroke-width="1"/>"#,
             x2 = w - pr
         ));
         svg.push_str(&format!(
-            r#"<text x="0" y="{:.1}" fill="rgba(255,255,255,0.4)" font-size="9" font-family="sans-serif">{pct}%</text>"#,
+            r#"<text x="0" y="{:.1}" fill="{label}" font-size="9" font-family="sans-serif">{pct}%</text>"#,
             y + 4.0
         ));
     }
 
     if points.len() < 2 {
         svg.push_str(&format!(
-            r#"<text x="{:.1}" y="{:.1}" fill="rgba(255,255,255,0.4)" font-size="11" font-family="sans-serif">No history data yet</text>"#,
+            r#"<text x="{:.1}" y="{:.1}" fill="{label}" font-size="11" font-family="sans-serif">No history data yet</text>"#,
             w / 2.0 - 40.0, h / 2.0 + 4.0
         ));
         svg.push_str("</svg>");
@@ -227,24 +308,49 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
         pt + ch * (1.0 - (pct / 100.0).clamp(0.0, 1.0))
     };
 
-    // Build polyline points strings
-    let pts_5h: String = points
+    // Screen-space points per series (same timestamps → shared X positions).
+    let pts_5h: Vec<(f64, f64)> = points
         .iter()
-        .map(|p| format!("{:.1},{:.1}", to_x(p.timestamp), to_y(p.pct_5h)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let pts_7d: String = points
+        .map(|p| (to_x(p.timestamp), to_y(p.pct_5h)))
+        .collect();
+    let pts_7d: Vec<(f64, f64)> = points
         .iter()
-        .map(|p| format!("{:.1},{:.1}", to_x(p.timestamp), to_y(p.pct_7d)))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .map(|p| (to_x(p.timestamp), to_y(p.pct_7d)))
+        .collect();
+    let path_5h = smooth_path(&pts_5h);
+    let path_7d = smooth_path(&pts_7d);
+    let base_y = pt + ch;
+    let first_x = pts_5h.first().map(|p| p.0).unwrap_or(pl);
+    let last_x = pts_5h.last().map(|p| p.0).unwrap_or(pl);
 
+    // Gradient defs for the two area fills.
+    svg.push_str(
+        r##"<defs><linearGradient id="gs" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3C88FC" stop-opacity="0.25"/><stop offset="1" stop-color="#3C88FC" stop-opacity="0.02"/></linearGradient><linearGradient id="gw" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F59E0B" stop-opacity="0.22"/><stop offset="1" stop-color="#F59E0B" stop-opacity="0.02"/></linearGradient></defs>"##,
+    );
+
+    // Area fills (weekly behind session), then lines, then endpoint dots.
     svg.push_str(&format!(
-        "<polyline points=\"{pts_5h}\" fill=\"none\" stroke=\"#3C88FC\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>"
+        r#"<path d="{path_7d} L {last_x:.1} {base_y:.1} L {first_x:.1} {base_y:.1} Z" fill="url(#gw)" stroke="none"/>"#
     ));
     svg.push_str(&format!(
-        "<polyline points=\"{pts_7d}\" fill=\"none\" stroke=\"#F59E0B\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>"
+        r#"<path d="{path_5h} L {last_x:.1} {base_y:.1} L {first_x:.1} {base_y:.1} Z" fill="url(#gs)" stroke="none"/>"#
     ));
+    svg.push_str(&format!(
+        r##"<path d="{path_7d}" fill="none" stroke="#F59E0B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>"##
+    ));
+    svg.push_str(&format!(
+        r##"<path d="{path_5h}" fill="none" stroke="#3C88FC" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>"##
+    ));
+    if let Some(&(x, y)) = pts_7d.last() {
+        svg.push_str(&format!(
+            r##"<circle cx="{x:.1}" cy="{y:.1}" r="2.6" fill="#F59E0B" stroke="{ring}" stroke-width="1.4"/>"##
+        ));
+    }
+    if let Some(&(x, y)) = pts_5h.last() {
+        svg.push_str(&format!(
+            r##"<circle cx="{x:.1}" cy="{y:.1}" r="2.6" fill="#3C88FC" stroke="{ring}" stroke-width="1.4"/>"##
+        ));
+    }
 
     // X-axis ticks
     use chrono::{Datelike, Timelike};
@@ -261,7 +367,7 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
     for i in 0..=tick_count {
         let tick_time = now - chrono::Duration::seconds(range.seconds() - i as i64 * tick_interval_secs);
         let local = tick_time.with_timezone(&chrono::Local);
-        let label = match range {
+        let tick_label = match range {
             TimeRange::Hour1 | TimeRange::Hour6 | TimeRange::Day1 =>
                 format!("{:02}:{:02}", local.hour(), local.minute()),
             TimeRange::Day7 => {
@@ -273,12 +379,12 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange) -> String {
         let x = pl + (i as f64 / tick_count as f64) * cw;
         // tick mark
         svg.push_str(&format!(
-            r#"<line x1="{x:.1}" y1="{chart_bottom:.1}" x2="{x:.1}" y2="{tick_y2:.1}" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>"#
+            r#"<line x1="{x:.1}" y1="{chart_bottom:.1}" x2="{x:.1}" y2="{tick_y2:.1}" stroke="{tick}" stroke-width="1"/>"#
         ));
         // label — left-align first, right-align last, center others
         let anchor = if i == 0 { "start" } else if i == tick_count { "end" } else { "middle" };
         svg.push_str(&format!(
-            r#"<text x="{x:.1}" y="{label_y:.1}" fill="rgba(255,255,255,0.4)" font-size="8" font-family="sans-serif" text-anchor="{anchor}">{label}</text>"#
+            r#"<text x="{x:.1}" y="{label_y:.1}" fill="{label}" font-size="8" font-family="sans-serif" text-anchor="{anchor}">{tick_label}</text>"#
         ));
     }
 
@@ -827,8 +933,9 @@ impl TokenTrkrApplet {
             col = col.push(range_row);
 
             // SVG chart — rebuilds fresh every view call so range/data changes always render
+            let is_dark = cosmic::theme::active().cosmic().is_dark;
             let points = self.history.points_for_range(self.selected_range);
-            let svg_data = build_chart_svg(&points, self.selected_range);
+            let svg_data = build_chart_svg(&points, self.selected_range, is_dark);
             let svg_handle = widget::svg::Handle::from_memory(svg_data.into_bytes());
             col = col.push(
                 widget::Svg::new(svg_handle)
@@ -878,5 +985,135 @@ impl TokenTrkrApplet {
         );
 
         self.core.applet.popup_container(col).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Walk an SVG path `d` string, returning every anchor/control-point Y.
+    /// Handles the `M x y` and `C c1x c1y, c2x c2y, x y` commands this module emits.
+    fn path_ys(d: &str) -> Vec<f64> {
+        let toks: Vec<&str> = d.split([' ', ',']).filter(|t| !t.is_empty()).collect();
+        let mut ys = Vec::new();
+        let mut i = 0;
+        while i < toks.len() {
+            match toks[i] {
+                "M" => {
+                    ys.push(toks[i + 2].parse().expect("M y"));
+                    i += 3;
+                }
+                "C" => {
+                    for k in [2usize, 4, 6] {
+                        ys.push(toks[i + k].parse().expect("C y"));
+                    }
+                    i += 7;
+                }
+                _ => i += 1,
+            }
+        }
+        ys
+    }
+
+    #[test]
+    fn smoothing_a_spiky_series_never_overshoots_input_range() {
+        let pts = vec![
+            (0.0, 50.0),
+            (10.0, 10.0),
+            (20.0, 90.0),
+            (30.0, 12.0),
+            (40.0, 88.0),
+        ];
+        let min = 10.0_f64;
+        let max = 90.0_f64;
+
+        let d = smooth_path(&pts);
+
+        for y in path_ys(&d) {
+            assert!(
+                y >= min - 0.05 && y <= max + 0.05,
+                "control point y={y} escaped input range [{min}, {max}]"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_multiple_points_emits_cubic_path_with_no_nan() {
+        let pts = vec![(0.0, 5.0), (10.0, 40.0), (20.0, 35.0), (30.0, 80.0)];
+
+        let d = smooth_path(&pts);
+
+        assert!(d.starts_with("M "));
+        assert!(d.contains(" C "));
+        assert!(!d.contains("NaN") && !d.contains("inf"));
+    }
+
+    #[test]
+    fn smoothing_a_single_point_emits_only_a_moveto() {
+        let d = smooth_path(&[(3.0, 7.0)]);
+
+        assert_eq!(d, "M 3.0 7.0");
+    }
+
+    fn sample_points() -> Vec<UsageDataPoint> {
+        let now = chrono::Utc::now();
+        (0..6)
+            .map(|i| UsageDataPoint {
+                timestamp: now - chrono::Duration::minutes((6 - i) * 30),
+                pct_5h: 10.0 + i as f64 * 12.0,
+                pct_7d: 40.0 + i as f64 * 2.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dark_and_light_themes_produce_different_grid_colors() {
+        let pts = sample_points();
+
+        let dark = build_chart_svg(&pts, TimeRange::Hour6, true);
+        let light = build_chart_svg(&pts, TimeRange::Hour6, false);
+
+        assert!(dark.contains("rgba(255,255,255,0.1)"));
+        assert!(light.contains("rgba(20,28,40,0.1)"));
+        assert_ne!(dark, light);
+    }
+
+    #[test]
+    fn too_few_points_renders_empty_state_with_theme_label_color() {
+        let one = vec![UsageDataPoint {
+            timestamp: chrono::Utc::now(),
+            pct_5h: 20.0,
+            pct_7d: 50.0,
+        }];
+
+        let light = build_chart_svg(&one, TimeRange::Hour6, false);
+
+        assert!(light.contains("No history data yet"));
+        assert!(light.contains("rgba(20,28,40,0.5)"));
+    }
+
+    #[test]
+    fn a_populated_chart_draws_smoothed_paths_fills_and_endpoint_dots() {
+        let pts = sample_points();
+
+        let svg = build_chart_svg(&pts, TimeRange::Hour6, true);
+
+        assert!(svg.contains("<path"), "series should be smoothed paths");
+        assert!(svg.contains(" C "), "paths should use cubic segments");
+        assert!(svg.contains("linearGradient"), "series should have area fills");
+        assert!(svg.matches("<circle").count() == 2, "one endpoint dot per series");
+        assert!(!svg.contains("<polyline"), "polylines should be gone");
+    }
+
+    #[test]
+    fn endpoint_dot_ring_follows_the_theme_surface() {
+        let pts = sample_points();
+
+        let dark = build_chart_svg(&pts, TimeRange::Hour6, true);
+        let light = build_chart_svg(&pts, TimeRange::Hour6, false);
+
+        assert!(dark.contains(r##"stroke="#21242b""##));
+        assert!(light.contains(r##"stroke="#f4f6fa""##));
     }
 }

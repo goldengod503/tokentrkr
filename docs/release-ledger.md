@@ -23,3 +23,4 @@ Specs: `homelab2-docs/specs/tokentrkr/2026-06-10-core-review-INDEX.md`
 | Item | Risk | Status | Release doc / notes |
 |---|---|---|---|
 | Model-scoped limits (Fable) from `limits` array | Low | Done | [2026-07-05_005](correctness/releases/2026-07-05_005_fable-scoped-limits.md) |
+| Smooth & theme-aware usage chart (Option C) | Low | Done | [2026-07-05_006](correctness/releases/2026-07-05_006_chart-smoothing.md) — visual verify pending Peter |
