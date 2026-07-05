@@ -17,3 +17,9 @@ Specs: `homelab2-docs/specs/tokentrkr/2026-06-10-core-review-INDEX.md`
 | Retry-after propagation (R3) | Medium | Done | [2026-07-05_002](correctness/releases/2026-07-05_002_retry-after-propagation.md) |
 | State & UI completeness (R5/R6/R8) | Low | Done | [2026-07-05_003](correctness/releases/2026-07-05_003_state-ui-completeness.md) |
 | Core housekeeping (R9/R10/R11) | Low | Done | [2026-07-05_004](correctness/releases/2026-07-05_004_core-housekeeping.md) — Option A per Peter |
+
+## Feature work
+
+| Item | Risk | Status | Release doc / notes |
+|---|---|---|---|
+| Model-scoped limits (Fable) from `limits` array | Low | Done | [2026-07-05_005](correctness/releases/2026-07-05_005_fable-scoped-limits.md) |

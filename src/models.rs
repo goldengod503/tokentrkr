@@ -50,6 +50,28 @@ pub struct UsageApiResponse {
     pub seven_day_cowork: Option<WindowResponse>,
     pub seven_day_oauth_apps: Option<WindowResponse>,
     pub extra_usage: Option<ExtraUsageResponse>,
+    pub limits: Option<Vec<LimitResponse>>,
+}
+
+/// Entry in the newer `limits` array. Supersedes the flat `seven_day_*`
+/// keys, which the API now returns as null; model-scoped quotas (e.g.
+/// Fable) only appear here.
+#[derive(Debug, Deserialize)]
+pub struct LimitResponse {
+    pub kind: String,
+    pub percent: f64,
+    pub resets_at: Option<String>,
+    pub scope: Option<LimitScopeResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LimitScopeResponse {
+    pub model: Option<ModelScopeResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelScopeResponse {
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

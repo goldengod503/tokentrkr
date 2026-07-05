@@ -332,6 +332,53 @@ fn window_from_response(resp: &WindowResponse, label: &str, window_minutes: Opti
     }
 }
 
+/// Model-scoped windows come from the `limits` array when it carries any
+/// (the current API shape); the flat `seven_day_*` keys are a fallback for
+/// older responses. Never both — an Opus entry present in each would
+/// otherwise render twice.
+fn build_model_windows(api_resp: &UsageApiResponse) -> Vec<RateWindow> {
+    let scoped: Vec<RateWindow> = api_resp
+        .limits
+        .iter()
+        .flatten()
+        .filter(|l| l.kind == "weekly_scoped")
+        .filter_map(|l| {
+            let name = l
+                .scope
+                .as_ref()?
+                .model
+                .as_ref()?
+                .display_name
+                .as_deref()?;
+            Some(RateWindow {
+                label: format!("{} (7d)", name),
+                used_percent: sanitize_utilization(l.percent),
+                window_minutes: Some(10080),
+                resets_at: l.resets_at.as_deref().and_then(parse_reset_time),
+                reset_description: None,
+            })
+        })
+        .collect();
+    if !scoped.is_empty() {
+        return scoped;
+    }
+
+    let legacy_fields: &[(&Option<WindowResponse>, &str)] = &[
+        (&api_resp.seven_day_sonnet, "Sonnet (7d)"),
+        (&api_resp.seven_day_opus, "Opus Extra (7d)"),
+        (&api_resp.seven_day_cowork, "Cowork (7d)"),
+        (&api_resp.seven_day_oauth_apps, "OAuth Apps (7d)"),
+    ];
+    legacy_fields
+        .iter()
+        .filter_map(|(field, label)| {
+            field
+                .as_ref()
+                .map(|w| window_from_response(w, label, Some(10080)))
+        })
+        .collect()
+}
+
 #[async_trait]
 impl Provider for ClaudeProvider {
     fn name(&self) -> &str {
@@ -368,25 +415,16 @@ impl Provider for ClaudeProvider {
             .as_ref()
             .map(|w| window_from_response(w, "Session (5h)", Some(300)));
 
+        // `seven_day` is the all-models weekly window, not Opus-specific —
+        // model-scoped weeklies land in `model_windows` below.
         let secondary = api_resp
             .seven_day
             .as_ref()
-            .map(|w| window_from_response(w, "Opus (7d)", Some(10080)));
+            .map(|w| window_from_response(w, "Weekly (7d)", Some(10080)));
 
         let tertiary = None;
 
-        let mut model_windows = Vec::new();
-        let model_fields: &[(&Option<WindowResponse>, &str)] = &[
-            (&api_resp.seven_day_sonnet, "Sonnet (7d)"),
-            (&api_resp.seven_day_opus, "Opus Extra (7d)"),
-            (&api_resp.seven_day_cowork, "Cowork (7d)"),
-            (&api_resp.seven_day_oauth_apps, "OAuth Apps (7d)"),
-        ];
-        for (field, label) in model_fields {
-            if let Some(w) = field {
-                model_windows.push(window_from_response(w, label, Some(10080)));
-            }
-        }
+        let model_windows = build_model_windows(&api_resp);
 
         let extra = api_resp.extra_usage.as_ref().map(|e| ExtraUsage {
             is_enabled: e.is_enabled,
@@ -486,6 +524,77 @@ mod tests {
             crate::provider::EmptyResponse.to_string(),
             "Claude usage API returned no data"
         );
+    }
+
+    #[test]
+    fn model_scoped_limit_entry_becomes_a_model_window() {
+        // Real response shape as of 2026-07-05: flat seven_day_* keys null,
+        // model-scoped quota only present in the limits array.
+        let json = r#"{
+            "five_hour": {"utilization": 30.0, "resets_at": null},
+            "seven_day": {"utilization": 29.0, "resets_at": null},
+            "seven_day_opus": null,
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 30, "severity": "normal", "resets_at": null, "scope": null, "is_active": false},
+                {"kind": "weekly_all", "group": "weekly", "percent": 29, "severity": "normal", "resets_at": null, "scope": null, "is_active": false},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 33, "severity": "normal", "resets_at": "2026-07-07T01:00:00+00:00", "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}, "is_active": true}
+            ]
+        }"#;
+        let resp: UsageApiResponse = serde_json::from_str(json).expect("parse");
+
+        let windows = super::build_model_windows(&resp);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Fable (7d)");
+        assert_eq!(windows[0].used_percent, 33.0);
+        assert!(windows[0].resets_at.is_some());
+    }
+
+    #[test]
+    fn scoped_limits_take_precedence_over_legacy_model_keys() {
+        let json = r#"{
+            "seven_day_sonnet": {"utilization": 10.0, "resets_at": null},
+            "limits": [
+                {"kind": "weekly_scoped", "percent": 33, "resets_at": null, "scope": {"model": {"display_name": "Fable"}}}
+            ]
+        }"#;
+        let resp: UsageApiResponse = serde_json::from_str(json).expect("parse");
+
+        let windows = super::build_model_windows(&resp);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Fable (7d)");
+    }
+
+    #[test]
+    fn legacy_model_keys_still_render_when_limits_has_no_scoped_entries() {
+        let json = r#"{
+            "seven_day_sonnet": {"utilization": 10.0, "resets_at": null},
+            "limits": [
+                {"kind": "session", "percent": 30, "resets_at": null, "scope": null}
+            ]
+        }"#;
+        let resp: UsageApiResponse = serde_json::from_str(json).expect("parse");
+
+        let windows = super::build_model_windows(&resp);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Sonnet (7d)");
+    }
+
+    #[test]
+    fn scoped_limit_without_model_name_is_ignored() {
+        // A weekly_scoped entry scoped to a surface (or with a null model)
+        // has no renderable label — skip it rather than inventing one.
+        let json = r#"{
+            "limits": [
+                {"kind": "weekly_scoped", "percent": 20, "resets_at": null, "scope": {"model": null}},
+                {"kind": "weekly_scoped", "percent": 21, "resets_at": null, "scope": null}
+            ]
+        }"#;
+        let resp: UsageApiResponse = serde_json::from_str(json).expect("parse");
+
+        assert!(super::build_model_windows(&resp).is_empty());
     }
 
     #[test]
