@@ -6,8 +6,8 @@ use std::time::Duration;
 use crate::models::UsageSnapshot;
 
 #[async_trait]
-#[allow(dead_code)]
 pub trait Provider: Send + Sync {
+    #[allow(dead_code)]
     fn name(&self) -> &str;
     async fn fetch_usage(&self) -> Result<UsageSnapshot>;
 }
