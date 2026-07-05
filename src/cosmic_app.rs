@@ -270,8 +270,6 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange, is_dark: bool) -
             "#f4f6fa",
         )
     };
-    let _ = ring; // consumed in Task 3 (endpoint dots)
-
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#
     );
@@ -310,24 +308,49 @@ fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange, is_dark: bool) -
         pt + ch * (1.0 - (pct / 100.0).clamp(0.0, 1.0))
     };
 
-    // Build polyline points strings
-    let pts_5h: String = points
+    // Screen-space points per series (same timestamps → shared X positions).
+    let pts_5h: Vec<(f64, f64)> = points
         .iter()
-        .map(|p| format!("{:.1},{:.1}", to_x(p.timestamp), to_y(p.pct_5h)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let pts_7d: String = points
+        .map(|p| (to_x(p.timestamp), to_y(p.pct_5h)))
+        .collect();
+    let pts_7d: Vec<(f64, f64)> = points
         .iter()
-        .map(|p| format!("{:.1},{:.1}", to_x(p.timestamp), to_y(p.pct_7d)))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .map(|p| (to_x(p.timestamp), to_y(p.pct_7d)))
+        .collect();
+    let path_5h = smooth_path(&pts_5h);
+    let path_7d = smooth_path(&pts_7d);
+    let base_y = pt + ch;
+    let first_x = pts_5h.first().map(|p| p.0).unwrap_or(pl);
+    let last_x = pts_5h.last().map(|p| p.0).unwrap_or(pl);
 
+    // Gradient defs for the two area fills.
+    svg.push_str(
+        r##"<defs><linearGradient id="gs" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3C88FC" stop-opacity="0.25"/><stop offset="1" stop-color="#3C88FC" stop-opacity="0.02"/></linearGradient><linearGradient id="gw" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F59E0B" stop-opacity="0.22"/><stop offset="1" stop-color="#F59E0B" stop-opacity="0.02"/></linearGradient></defs>"##,
+    );
+
+    // Area fills (weekly behind session), then lines, then endpoint dots.
     svg.push_str(&format!(
-        "<polyline points=\"{pts_5h}\" fill=\"none\" stroke=\"#3C88FC\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>"
+        r#"<path d="{path_7d} L {last_x:.1} {base_y:.1} L {first_x:.1} {base_y:.1} Z" fill="url(#gw)" stroke="none"/>"#
     ));
     svg.push_str(&format!(
-        "<polyline points=\"{pts_7d}\" fill=\"none\" stroke=\"#F59E0B\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>"
+        r#"<path d="{path_5h} L {last_x:.1} {base_y:.1} L {first_x:.1} {base_y:.1} Z" fill="url(#gs)" stroke="none"/>"#
     ));
+    svg.push_str(&format!(
+        r##"<path d="{path_7d}" fill="none" stroke="#F59E0B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>"##
+    ));
+    svg.push_str(&format!(
+        r##"<path d="{path_5h}" fill="none" stroke="#3C88FC" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>"##
+    ));
+    if let Some(&(x, y)) = pts_7d.last() {
+        svg.push_str(&format!(
+            r##"<circle cx="{x:.1}" cy="{y:.1}" r="2.6" fill="#F59E0B" stroke="{ring}" stroke-width="1.4"/>"##
+        ));
+    }
+    if let Some(&(x, y)) = pts_5h.last() {
+        svg.push_str(&format!(
+            r##"<circle cx="{x:.1}" cy="{y:.1}" r="2.6" fill="#3C88FC" stroke="{ring}" stroke-width="1.4"/>"##
+        ));
+    }
 
     // X-axis ticks
     use chrono::{Datelike, Timelike};
@@ -1068,5 +1091,29 @@ mod tests {
 
         assert!(light.contains("No history data yet"));
         assert!(light.contains("rgba(20,28,40,0.5)"));
+    }
+
+    #[test]
+    fn a_populated_chart_draws_smoothed_paths_fills_and_endpoint_dots() {
+        let pts = sample_points();
+
+        let svg = build_chart_svg(&pts, TimeRange::Hour6, true);
+
+        assert!(svg.contains("<path"), "series should be smoothed paths");
+        assert!(svg.contains(" C "), "paths should use cubic segments");
+        assert!(svg.contains("linearGradient"), "series should have area fills");
+        assert!(svg.matches("<circle").count() == 2, "one endpoint dot per series");
+        assert!(!svg.contains("<polyline"), "polylines should be gone");
+    }
+
+    #[test]
+    fn endpoint_dot_ring_follows_the_theme_surface() {
+        let pts = sample_points();
+
+        let dark = build_chart_svg(&pts, TimeRange::Hour6, true);
+        let light = build_chart_svg(&pts, TimeRange::Hour6, false);
+
+        assert!(dark.contains(r##"stroke="#21242b""##));
+        assert!(light.contains(r##"stroke="#f4f6fa""##));
     }
 }
