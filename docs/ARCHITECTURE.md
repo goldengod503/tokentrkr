@@ -6,10 +6,12 @@ point of this doc is to give future architectural reviews a baseline to
 compare against — findings that contradict a stated decision here must
 argue against the doc rather than against a vacuum.
 
-**Last verified against commit:** 037298c (2026-05-17, rerun A1/A2/A3 followups merged)
+**Last verified against commit:** ccc6278 (2026-07-11, applet hardening merged)
 **Inputs:** `.code-review/REVIEW.md` (2026-05-16) + architectural-analysis
 recommendations A1–A7 (2026-05-17, output not retained on disk; A1 and A2
-shipped per `docs/correctness/releases/`).
+shipped per `docs/correctness/releases/`) + architectural-analysis on
+`src/cosmic_app.rs` (2026-07-11, A1–A3 shipped per release doc
+`2026-07-11_001`; A4–A6 deferred, see ledger).
 
 ## Current structure
 
@@ -17,18 +19,18 @@ shipped per `docs/correctness/releases/`).
 src/
   main.rs            90  composition root — builds Config, ClaudeProvider, UsageService, then the shell
   config.rs         224  on-disk config + tilde-path expansion
-  models.rs         137  wire types for the usage API and the in-memory snapshot
-  claude.rs         516  ClaudeProvider — OAuth refresh + usage fetch + atomic creds write
-  provider.rs        52  Provider trait + RateLimited / Unauthorized / EmptyResponse sentinel error types
-  history.rs        194  30-day percent history with atomic JSON writes
+  models.rs         199  wire types for the usage API and the in-memory snapshot (incl. model-scoped limits)
+  claude.rs         816  ClaudeProvider — OAuth refresh + usage fetch + atomic creds write + CAS-lite rotation guard
+  provider.rs        58  Provider trait + RateLimited / Unauthorized / EmptyResponse sentinel error types
+  history.rs        228  30-day percent history; ordered serialization + off-thread atomic JSON writes
   icon.rs           153  SVG icon rendering for SNI tray (vendored DejaVu Sans Bold)
-  tray.rs           385  ksni-based SNI tray + apply_event(&UsageEvent)
-  cosmic_app.rs     878  libcosmic applet — popup + iced Subscription forwarder; UsageStreamUnavailable handler
+  tray.rs           407  ksni-based SNI tray + apply_event(&UsageEvent)
+  cosmic_app.rs    1223  libcosmic applet — popup + iced Subscription forwarder; UsageStreamUnavailable handler; chart SVG helpers (smooth_path, build_chart_svg) + the file's first unit tests
   usage/                 orchestration core (extracted in A1)
-    mod.rs            7    re-exports
+    mod.rs            6    re-exports
     event.rs         66    UsageEvent enum (5 variants)
-    retry.rs         54    RetryPolicy (10/30/60s ladder)
-    service.rs      611    UsageService::spawn() — fetch + retry + state machine + MockProvider; EmitResult signals ChannelClosed; test-only JoinHandle on UsageHandle
+    retry.rs         63    RetryPolicy (10/30/60s ladder)
+    service.rs      741    UsageService::spawn() — fetch + retry + state machine + MockProvider; EmitResult signals ChannelClosed; test-only JoinHandle on UsageHandle
 ```
 
 **Build targets.** Two: `cargo build` with default features pulls libcosmic
@@ -177,20 +179,65 @@ decision exists to prevent). The `default_fetch_timeout_is_a_backstop_
 above_the_reqwest_ceiling` test enforces the margin. See release doc
 `2026-07-05_004`.
 
+### History persistence: serialize on the update thread, write on a blocking thread, last-rename-wins
+
+`apply_usage_result` serializes via `UsageHistory::serialize_pruned()` on
+the winit thread — so byte payloads are produced strictly in `record()`
+order — then hands `(path, bytes)` to `tokio::task::spawn_blocking` for
+the `atomic_write` + fsync (2026-07-11 A2; previously the fsync ran
+synchronously in `update()`, freezing the UI for the fsync's duration).
+Consequence: writes may now run concurrently. `atomic_write` uses a
+per-call tmp filename so concurrent writes cannot truncate each other's
+in-flight tmp (a shared tmp could corrupt `history.json`, which `load()`
+answers by wiping history); rename order is not guaranteed, so **last
+rename wins** — always a complete valid JSON, at most one stale data
+point until the next fetch rewrites the file. Accepted over a dedicated
+single-writer channel as the cheapest scheme whose failure mode is
+self-healing staleness rather than corruption. Also intentional: the
+history path is captured once at `load()`; a `Default`-constructed
+history has no path and persistence is a no-op — this is what keeps
+`handle_event` unit tests off the real history file. A synchronous-write
+fallback covers `Handle::try_current()` failing (not expected inside
+`update()`; preserves pre-A2 behavior instead of panicking if a libcosmic
+bump changes executor semantics). Do not flag the rename race or the
+no-path no-op as findings without arguing against this rationale. See
+release doc `2026-07-11_001`.
+
+### `FetchStarted` flushes the parked min-spin result, not guarded by `fetch_id`
+
+The min-spin gate parks a completed result in `pending_snapshot`; the
+`FetchStarted` arm applies it via `apply_usage_result` *before* resetting
+spin state. The flush is deliberately **not** compared against the
+incoming event's `fetch_id`: the parked result belongs to the previous
+fetch by construction (parking already required `fetch_id ==
+latest_fetch_id` at `Snapshot` time), so guarding it against the *new*
+fetch's id would re-drop it — exactly the silent history data loss
+(2026-07-11 analysis B1/R1) the flush exists to fix. See release doc
+`2026-07-11_001`.
+
 ## Known-deferred issues
 
 Items we have evidence for but consciously chose not to address now.
 Each has a reopen trigger.
 
-### A5 — Split `cosmic_app.rs` (858 lines) into submodules
+### A5 — Split `cosmic_app.rs` (1223 lines as of 2026-07-11) into submodules
 - **Why deferred:** The file is the largest in the codebase but it's
-  organized into clear sections (popup, subscription, message handling).
-  No friction is being paid today — every change since the A1 extraction
-  has been local to one section.
+  organized into clear sections (popup, subscription, message handling,
+  chart helpers). No friction is being paid today — every change since
+  the A1 extraction has been local to one section (verified against the
+  full commit range at the 2026-07-11 analysis; the 2026-07-11 hardening
+  merge bundled three independent single-section fixes, not one change
+  spanning three sections).
+- **Known severable island (2026-07-11 S1):** the chart block
+  (`smooth_path` + `build_chart_svg` + their tests, ~350 lines, zero
+  `cosmic::` references) is extractable to `src/chart.rs` at near-zero
+  risk. Deferred under the same trigger — no friction paid today.
 - **Reopen when:** A change requires editing three or more sections of
   `cosmic_app.rs` in the same PR, OR a second long-lived
-  `iced::Subscription` is added.
-- **Source:** Architectural-analysis A5 (2026-05-17).
+  `iced::Subscription` is added, OR a single PR must edit the chart
+  helpers and message handling together.
+- **Source:** Architectural-analysis A5 (2026-05-17); re-examined
+  2026-07-11 (S1/S2).
 
 ### A7 — Move wire types out of `models.rs` into `claude::wire`
 - **Why deferred:** `models.rs` mixes the wire DTOs with the in-memory
@@ -250,6 +297,16 @@ Each has a reopen trigger.
 - **Why deferred:** Two byte-identical copies. Cosmetic; no compile-time
   catch on drift. Reopen if thresholds change.
 
+### "Updated X min ago" formatter duplication
+- **Why deferred:** Byte-identical `ago < 60 → "Updated just now" /
+  else "Updated {} min ago"` logic implemented independently in both
+  shells (`src/cosmic_app.rs:973`, `src/tray.rs:248`). Third instance of
+  the WARN-005/SUGG-002 pattern. Extraction would cross the cosmic/SNI
+  feature gate for a two-line cosmetic helper — failed YAGNI test.
+- **Reopen when:** The two copies drift, OR a third caller appears, OR
+  a shared shell-formatting module is created for another reason.
+- **Source:** 2026-07-11 architectural-analysis S6.
+
 ### A4 — `RetryPolicy` public surface (zero external callers)
 - **Partially taken 2026-07-05 (R10):** the confirmed-dead subset —
   `with_retry()` and the `pub use retry::RetryPolicy` re-export — is
@@ -280,7 +337,7 @@ Each has a reopen trigger.
 - **Why deferred:** The retry ladder at `src/usage/service.rs:153-169`
   faithfully populates `retrying_in: Option<Duration>` on every
   `TransientError` emit, but both shells discard it via `..` patterns
-  (`src/cosmic_app.rs:320`, `src/tray.rs:31`). The compiler emits a
+  (`src/cosmic_app.rs:443`, `src/tray.rs:31`). The compiler emits a
   dead-code warning. The field exists as infrastructure for a future
   "retrying in Xs" UI element that has not been built. Removing it now
   is reversible churn — when the UI is added the field returns. Note:
@@ -390,6 +447,44 @@ focused on the post-A1/A2/A3 code introduced above. One merged branch:
   41 unit tests pass on both build targets; net structural delta is
   ~14 lines in `cosmic_app.rs` (variant + handler) and ~20 lines in
   `service.rs` (test rewrite + cfg(test) field).
+
+### 2026-05-23 → 2026-07-05: core-review remediation + feature growth (no module moves)
+
+Seven release docs, no structural boundary changes — the Intentional
+decisions above were amended in place (`retry-after` propagation, exit
+Dormant on Transient, 45s backstop, credentials CAS-lite guard; release
+docs `2026-07-05_001`–`_004`). Feature growth: local-timezone reset
+rendering (`2026-05-23_001`), model-scoped limits (Fable) parsing grew
+`claude.rs`/`models.rs` (`2026-07-05_005`), and the chart-smoothing pass
+(`2026-07-05_006`) grew `cosmic_app.rs` by ~350 lines of
+framework-independent SVG helpers (`smooth_path`, `build_chart_svg`)
+plus the file's first `#[cfg(test)]` module. Also added: `justfile`,
+`docs/release-ledger.md`.
+
+### 2026-07-11: applet hardening (min-spin flush, history persistence split, themed bars)
+
+Driven by the architectural-analysis run focused on `src/cosmic_app.rs`.
+One merged branch (`fix/applet-hardening`, commit `9ecd0fb`, merge
+`ccc6278`):
+
+- **A1** (B1/R1, High): `FetchStarted` applies a `pending_snapshot`
+  parked by the min-spin gate *before* resetting spin state, closing the
+  silent history data-loss path (manual refresh during the ~3s spin
+  window dropped the fetched reading). First `handle_event` unit tests
+  (flush Ok/Err, post-min-spin direct apply, stale `fetch_id` rejection).
+- **A2** (C1/R2, Medium): history persistence ownership shift —
+  `UsageHistory::save()` replaced by `serialize_pruned()` (update
+  thread, ordered with `record()`) + `write_bytes()` on
+  `spawn_blocking`; path captured at `load()`; per-call tmp names in
+  `atomic_write`. See the new Intentional decision above.
+- **A3** (B5/R3, Medium): `progress_bar_bg` honors the active theme
+  (white-alpha track on dark, black-alpha on light) — closes the
+  progress-bar half of the chart-smoothing release doc's
+  "rest of popup is dark-only" open item.
+
+Release doc `2026-07-11_001`. 69 tests pass (cosmic), 58 (SNI); both
+targets build. A4–A6 from the same analysis deferred (ledger,
+2026-07-11 section).
 
 ## Out of scope for this doc
 
