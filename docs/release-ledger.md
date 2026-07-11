@@ -18,6 +18,15 @@ Specs: `homelab2-docs/specs/tokentrkr/2026-06-10-core-review-INDEX.md`
 | State & UI completeness (R5/R6/R8) | Low | Done | [2026-07-05_003](correctness/releases/2026-07-05_003_state-ui-completeness.md) |
 | Core housekeeping (R9/R10/R11) | Low | Done | [2026-07-05_004](correctness/releases/2026-07-05_004_core-housekeeping.md) — Option A per Peter |
 
+## 2026-07-11 architectural-analysis remediation (cosmic_app focus)
+
+| Item | Risk | Status | Release doc / notes |
+|---|---|---|---|
+| A1: min-spin parked-snapshot flush (B1/R1) | High | Done | [2026-07-11_001](correctness/releases/2026-07-11_001_applet-hardening.md) |
+| A2: history fsync off the UI thread (C1/R2) | Medium | Done | [2026-07-11_001](correctness/releases/2026-07-11_001_applet-hardening.md) |
+| A3: theme-aware progress-bar track (B5/R3) | Medium | Done | [2026-07-11_001](correctness/releases/2026-07-11_001_applet-hardening.md) — visual verify pending Peter |
+| A4–A6: clamp helper, warn! logs, doc sync | Low | Not Started | Deferred; A6 doc items partially covered by refresh-architecture pass |
+
 ## Feature work
 
 | Item | Risk | Status | Release doc / notes |
