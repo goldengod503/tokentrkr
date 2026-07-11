@@ -157,9 +157,16 @@ fn format_plan_name(raw: &str) -> String {
     }
 }
 
-fn progress_bar_bg(_theme: &Theme) -> container::Style {
+fn progress_bar_bg(theme: &Theme) -> container::Style {
+    // White-alpha vanishes on a light theme (same failure the chart fix
+    // addressed); pick the track tint from the active theme instead.
+    let track = if theme.cosmic().is_dark {
+        cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.08)
+    } else {
+        cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.08)
+    };
     container::Style {
-        background: Some(cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.08).into()),
+        background: Some(track.into()),
         border: cosmic::iced::Border {
             radius: 4.0.into(),
             ..Default::default()
@@ -409,11 +416,16 @@ impl TokenTrkrApplet {
         use crate::usage::UsageEvent;
         match event {
             UsageEvent::FetchStarted { fetch_id } => {
+                // A result parked by the min-spin gate must be applied before
+                // this arm resets state, or the fetched reading is silently
+                // dropped from history (manual refresh during the spin window).
+                if let Some(parked) = self.pending_snapshot.take() {
+                    self.apply_usage_result(parked);
+                }
                 self.latest_fetch_id = fetch_id;
                 self.refreshing = true;
                 self.spin_phase = 0.0;
                 self.fetch_done = false;
-                self.pending_snapshot = None;
             }
             UsageEvent::Snapshot { fetch_id, snapshot } => {
                 if fetch_id != self.latest_fetch_id {
@@ -464,7 +476,16 @@ impl TokenTrkrApplet {
                 info!("Usage updated: session={:.0}%", pct_5h);
 
                 self.history.record(pct_5h, pct_7d);
-                self.history.save();
+                // Serialize here (ordered with record); push the fsync-bearing
+                // write off the winit event-loop thread.
+                if let Some((path, bytes)) = self.history.serialize_pruned() {
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(rt) => {
+                            rt.spawn_blocking(move || UsageHistory::write_bytes(&path, &bytes));
+                        }
+                        Err(_) => UsageHistory::write_bytes(&path, &bytes),
+                    }
+                }
 
                 self.snapshot = Some(snapshot);
                 self.error = None;
@@ -1115,5 +1136,88 @@ mod tests {
 
         assert!(dark.contains(r##"stroke="#21242b""##));
         assert!(light.contains(r##"stroke="#f4f6fa""##));
+    }
+
+    use crate::usage::UsageEvent;
+
+    fn snapshot_with_session_pct(pct: f64) -> UsageSnapshot {
+        UsageSnapshot {
+            primary: Some(crate::models::RateWindow {
+                label: "Session".into(),
+                used_percent: pct,
+                window_minutes: None,
+                resets_at: None,
+                reset_description: None,
+            }),
+            secondary: None,
+            tertiary: None,
+            model_windows: vec![],
+            extra_usage: None,
+            updated_at: chrono::Utc::now(),
+            identity: None,
+        }
+    }
+
+    #[test]
+    fn fetch_started_during_min_spin_window_flushes_the_parked_snapshot_into_history() {
+        let mut app = TokenTrkrApplet::default();
+        app.handle_event(UsageEvent::FetchStarted { fetch_id: 1 });
+        app.handle_event(UsageEvent::Snapshot {
+            fetch_id: 1,
+            snapshot: snapshot_with_session_pct(42.0),
+        });
+        assert!(app.snapshot.is_none(), "min-spin gate should park the snapshot");
+
+        app.handle_event(UsageEvent::FetchStarted { fetch_id: 2 });
+
+        assert_eq!(app.history.data_points.len(), 1);
+        assert_eq!(app.history.data_points[0].pct_5h, 42.0);
+        assert!(app.snapshot.is_some());
+        assert!(app.pending_snapshot.is_none());
+    }
+
+    #[test]
+    fn fetch_started_during_min_spin_window_flushes_a_parked_error() {
+        let mut app = TokenTrkrApplet::default();
+        app.handle_event(UsageEvent::FetchStarted { fetch_id: 1 });
+        app.handle_event(UsageEvent::PermanentError {
+            fetch_id: 1,
+            message: "boom".into(),
+        });
+
+        app.handle_event(UsageEvent::FetchStarted { fetch_id: 2 });
+
+        assert_eq!(app.error.as_deref(), Some("boom"));
+        assert!(app.pending_snapshot.is_none());
+    }
+
+    #[test]
+    fn snapshot_after_min_spin_elapsed_applies_directly_and_stops_refreshing() {
+        let mut app = TokenTrkrApplet::default();
+        app.handle_event(UsageEvent::FetchStarted { fetch_id: 1 });
+        app.spin_phase = MIN_SPIN_PHASE;
+
+        app.handle_event(UsageEvent::Snapshot {
+            fetch_id: 1,
+            snapshot: snapshot_with_session_pct(10.0),
+        });
+
+        assert_eq!(app.history.data_points.len(), 1);
+        assert!(!app.refreshing);
+        assert!(app.snapshot.is_some());
+    }
+
+    #[test]
+    fn a_snapshot_from_a_superseded_fetch_is_ignored() {
+        let mut app = TokenTrkrApplet::default();
+        app.handle_event(UsageEvent::FetchStarted { fetch_id: 2 });
+
+        app.handle_event(UsageEvent::Snapshot {
+            fetch_id: 1,
+            snapshot: snapshot_with_session_pct(10.0),
+        });
+
+        assert!(app.snapshot.is_none());
+        assert!(app.history.data_points.is_empty());
     }
 }

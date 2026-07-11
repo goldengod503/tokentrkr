@@ -18,6 +18,10 @@ pub struct UsageDataPoint {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageHistory {
     pub data_points: Vec<UsageDataPoint>,
+    // Captured once at load(); None (Default) makes persistence a no-op,
+    // which keeps unit tests off the real history file.
+    #[serde(skip)]
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,26 +73,29 @@ impl UsageHistory {
         let Some(path) = Self::history_path() else {
             return Self::default();
         };
-        if !path.exists() {
-            return Self::default();
-        }
-        match fs::read_to_string(&path) {
-            Ok(contents) => match serde_json::from_str::<UsageHistory>(&contents) {
-                Ok(mut h) => {
-                    h.prune();
-                    debug!("Loaded {} history points", h.data_points.len());
-                    h
-                }
+        let mut loaded = if !path.exists() {
+            Self::default()
+        } else {
+            match fs::read_to_string(&path) {
+                Ok(contents) => match serde_json::from_str::<UsageHistory>(&contents) {
+                    Ok(mut h) => {
+                        h.prune();
+                        debug!("Loaded {} history points", h.data_points.len());
+                        h
+                    }
+                    Err(e) => {
+                        error!("Corrupt history file, starting fresh: {}", e);
+                        Self::default()
+                    }
+                },
                 Err(e) => {
-                    error!("Corrupt history file, starting fresh: {}", e);
+                    error!("Failed to read history: {}", e);
                     Self::default()
                 }
-            },
-            Err(e) => {
-                error!("Failed to read history: {}", e);
-                Self::default()
             }
-        }
+        };
+        loaded.path = Some(path);
+        loaded
     }
 
     pub fn record(&mut self, pct_5h: f64, pct_7d: f64) {
@@ -99,22 +106,26 @@ impl UsageHistory {
         });
     }
 
-    pub fn save(&mut self) {
+    /// Prunes and serializes on the caller's thread so write ordering follows
+    /// record() ordering, returning the bytes and destination so the caller
+    /// can move the blocking disk write (fsync) off the UI thread.
+    pub fn serialize_pruned(&mut self) -> Option<(PathBuf, Vec<u8>)> {
         self.prune();
-        let Some(path) = Self::history_path() else {
-            return;
-        };
+        let path = self.path.clone()?;
+        match serde_json::to_string(self) {
+            Ok(json) => Some((path, json.into_bytes())),
+            Err(e) => {
+                error!("Failed to serialize history: {}", e);
+                None
+            }
+        }
+    }
+
+    pub fn write_bytes(path: &Path, contents: &[u8]) {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let json = match serde_json::to_string(&self) {
-            Ok(j) => j,
-            Err(e) => {
-                error!("Failed to serialize history: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = atomic_write(&path, json.as_bytes()) {
+        if let Err(e) = atomic_write(path, contents) {
             error!("Failed to write history: {}", e);
         }
     }
@@ -137,7 +148,14 @@ impl UsageHistory {
 
 fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("json.tmp");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Writes may now run concurrently on blocking threads; a per-call tmp
+    // name keeps one write from truncating another's in-flight tmp file.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "json.tmp{}",
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     {
         let mut f = fs::OpenOptions::new()
             .write(true)
@@ -171,24 +189,40 @@ mod tests {
         let path = dir.path().join("history.json");
         atomic_write(&path, b"{}").expect("write");
 
-        let tmp = path.with_extension("json.tmp");
-        assert!(!tmp.exists(), "tmp artifact should be renamed away");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "history.json")
+            .collect();
+        assert!(leftovers.is_empty(), "tmp artifact should be renamed away");
     }
 
     #[test]
-    fn save_then_load_round_trips_data_points() {
-        // We can't redirect history_path() to a tempdir without a deeper
-        // refactor, so round-trip via the serde format directly. This is
-        // the property atomic_write exists to preserve.
-        let mut h = UsageHistory::default();
+    fn serialize_pruned_then_write_bytes_round_trips_through_the_injected_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.json");
+        let mut h = UsageHistory {
+            data_points: vec![],
+            path: Some(path.clone()),
+        };
         h.record(13.0, 27.5);
         h.record(0.0, 100.0);
 
-        let json = serde_json::to_string(&h).expect("ser");
-        let back: UsageHistory = serde_json::from_str(&json).expect("de");
+        let (dest, bytes) = h.serialize_pruned().expect("serialize");
+        UsageHistory::write_bytes(&dest, &bytes);
 
+        let contents = fs::read_to_string(&path).expect("read");
+        let back: UsageHistory = serde_json::from_str(&contents).expect("de");
         assert_eq!(back.data_points.len(), 2);
         assert_eq!(back.data_points[0].pct_5h, 13.0);
         assert_eq!(back.data_points[1].pct_7d, 100.0);
+    }
+
+    #[test]
+    fn serialize_pruned_without_a_backing_path_returns_none() {
+        let mut h = UsageHistory::default();
+        h.record(1.0, 2.0);
+
+        assert!(h.serialize_pruned().is_none());
     }
 }
