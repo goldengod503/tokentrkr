@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use cosmic::iced::window::Id;
 use cosmic::iced::{Alignment, Length, Limits, Rectangle, Subscription};
 use cosmic::prelude::*;
-use cosmic::surface::action::{app_popup, destroy_popup};
+use cosmic::surface::action::{app_popup, destroy_popup, LiveSettings};
 use cosmic::widget::{self, container};
 use cosmic::Theme;
 use cosmic::iced::futures::SinkExt;
@@ -645,6 +645,10 @@ impl cosmic::Application for TokenTrkrApplet {
                     Message::Surface(destroy_popup(id))
                 } else {
                     Message::Surface(app_popup::<TokenTrkrApplet>(
+                        // All-None: inherit the surface-type defaults, so the
+                        // popup follows COSMIC Settings → Appearance rather
+                        // than carrying a TokenTrkr-local blur override.
+                        |_state: &TokenTrkrApplet| LiveSettings::default(),
                         move |state: &mut TokenTrkrApplet| {
                             let new_id = Id::unique();
                             state.popup = Some(new_id);
