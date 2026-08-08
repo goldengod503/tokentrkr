@@ -23,12 +23,12 @@ TokenTrkr does.
 > originally named `org_kde_kwin_blur_manager` as the protocol. That is
 > wrong — there is no KWin blur anywhere in the pinned tree
 > (`grep -rn "org_kde_kwin_blur"` across the full pinned libcosmic
-> checkout returns 0 matches). The `c31e3d6` commit body carries the
-> same error and is **not** being amended — it is the first of two
-> commits on a branch about to be reviewed by its owner, and rewriting
-> it means a history rewrite. `ext_background_effect_v1` is the correct
-> protocol; treat this doc, not the commit message, as authoritative on
-> that point. The `org_kde_kwin_blur*` strings present in the release
+> checkout returns 0 matches). `ext_background_effect_v1` is the correct
+> protocol. The code commit carried the same error in its body and has
+> been reworded — the branch was rebased before it was ever pushed, so
+> the code commit is now `2d0f88d` (was `c31e3d6`). Content is
+> byte-identical across the rebase; only commit messages changed. The
+> `org_kde_kwin_blur*` strings present in the release
 > binary are incidental — they come from `wayland-protocols-plasma`
 > being linked but unused, and were present before this bump too; they
 > are not evidence of a KWin blur path.
@@ -111,7 +111,7 @@ cargo test --no-default-features  →  58 passed; 0 failed
 ```
 
 Both counts match the pre-bump baseline exactly (measured in Task 2 on
-this same commit `c31e3d6`; not re-run for this doc).
+this same commit `2d0f88d`; not re-run for this doc).
 
 Release builds, SNI-first then COSMIC-last (per project convention, since
 both targets write `target/release/tokentrkr`):
@@ -130,7 +130,7 @@ survive into the stripped binary's strings, and the command in fact
 returned `0` on the built binary — a result that proves nothing either
 way, since it would return `0` whether or not the blur path is compiled
 in. It was replaced with a three-part evidence chain, all measured against
-the actual `c31e3d6` build:
+the actual `2d0f88d` build:
 
 1. **Compile-time gate is active.** `src/app/cosmic.rs:943` guards the
    blur-toggling block with `#[cfg(wayland_platform)]`. libcosmic's build
@@ -174,8 +174,8 @@ ownership, or state machines, so it does not meet the
 
 ## Rollback Plan
 
-Single code commit `c31e3d6` on `feat/frosted-glass`.
-`git revert c31e3d6` restores: the libcosmic pin at
+Single code commit `2d0f88d` on `feat/frosted-glass`.
+`git revert 2d0f88d` restores: the libcosmic pin at
 `17291536a10124a053b40c49bb459d7b5085331b`, the prior `Cargo.lock`, and
 the 2-argument `app_popup` call (no `LiveSettings`).
 
