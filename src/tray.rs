@@ -11,14 +11,16 @@ pub struct TrkrTray {
     pub snapshot: Option<UsageSnapshot>,
     pub error: Option<String>,
     refresh_tx: mpsc::Sender<()>,
+    shutdown_tx: mpsc::Sender<()>,
 }
 
 impl TrkrTray {
-    pub fn new(refresh_tx: mpsc::Sender<()>) -> Self {
+    pub fn new(refresh_tx: mpsc::Sender<()>, shutdown_tx: mpsc::Sender<()>) -> Self {
         Self {
             snapshot: None,
             error: None,
             refresh_tx,
+            shutdown_tx,
         }
     }
 
@@ -303,11 +305,15 @@ impl ksni::Tray for TrkrTray {
             }
             .into(),
         );
+        // Signal the event loop instead of process::exit: a panel-hosted applet
+        // that vanishes mid-callback makes cosmic-panel tear down and rebuild
+        // every applet surface, which costs the compositor a modeset.
+        let shutdown_tx = self.shutdown_tx.clone();
         items.push(
             StandardItem {
                 label: "Quit".to_string(),
                 activate: Box::new(move |_tray: &mut Self| {
-                    std::process::exit(0);
+                    let _ = shutdown_tx.try_send(());
                 }),
                 ..Default::default()
             }
@@ -326,7 +332,8 @@ mod tests {
 
     fn make_tray() -> TrkrTray {
         let (tx, _rx) = mpsc::channel(1);
-        TrkrTray::new(tx)
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        TrkrTray::new(tx, shutdown_tx)
     }
 
     fn synthetic_snapshot() -> UsageSnapshot {

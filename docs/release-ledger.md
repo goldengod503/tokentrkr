@@ -34,6 +34,7 @@ Spec: `homelab2-docs/specs/tokentrkr/2026-08-08-frosted-glass-design.md`
 | Item | Risk | Status | Release doc / notes |
 |---|---|---|---|
 | Frosted-glass popup via libcosmic bump | Medium | Done | [2026-08-08_001](correctness/releases/2026-08-08_001_frosted-glass.md) — visually confirmed by Peter 2026-08-08 |
+| Applet lifecycle: `%F` field code + SNI `process::exit` paths | Low | Done | [2026-08-08_002](correctness/releases/2026-08-08_002_applet-lifecycle.md) — no COSMIC-target behavior change; display blanking was environmental (stale compositor), fixed by reboot, not by this |
 
 ## Feature work
 

@@ -68,23 +68,32 @@ fn main() -> anyhow::Result<()> {
 async fn run_sni(provider: Arc<dyn Provider>, poll_interval: Duration) -> anyhow::Result<()> {
     let UsageHandle { events, refresh, .. } = UsageService::new(provider, poll_interval).spawn();
 
-    let tray = TrkrTray::new(refresh);
+    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+    let tray = TrkrTray::new(refresh, shutdown_tx);
     let tray_handle: ksni::Handle<TrkrTray> = tray.spawn().await.expect("Failed to create system tray");
 
-    sni_event_loop(events, tray_handle).await;
+    sni_event_loop(events, shutdown_rx, tray_handle).await;
     Ok(())
 }
 
 async fn sni_event_loop(
     mut events: mpsc::Receiver<UsageEvent>,
+    mut shutdown: mpsc::Receiver<()>,
     tray_handle: ksni::Handle<TrkrTray>,
 ) {
-    while let Some(event) = events.recv().await {
-        tray_handle
-            .update(|tray| tray.apply_event(&event))
-            .await;
+    loop {
+        tokio::select! {
+            // None: events channel closed, service was dropped.
+            maybe_event = events.recv() => match maybe_event {
+                Some(event) => {
+                    tray_handle.update(|tray| tray.apply_event(&event)).await;
+                }
+                None => break,
+            },
+            _ = shutdown.recv() => break,
+        }
     }
-    // events channel closed: service was dropped. Shutdown the tray.
+    // Return rather than process::exit so the runtime unwinds and main's
+    // Ok(()) sets the exit status.
     tray_handle.shutdown().await;
-    std::process::exit(0);
 }
