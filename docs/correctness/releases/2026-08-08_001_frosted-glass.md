@@ -81,7 +81,11 @@ direct dependencies, most notably **`ksni` `0.3.3 → 0.3.6`**, the tray
 implementation used directly in first-party code (`use ksni::TrayMethods`
 — `src/main.rs:23`; `ksni::Handle<TrkrTray>` — `src/main.rs:72,80`; `use
 ksni::Icon` — `src/icon.rs:2`). `tokio` and the reqwest/rustls stack moved
-too (see Strength 5 of the review). None of this is libcosmic's doing,
+too, all forward-only (`tokio 1.50.0 → 1.53.1`, `rustls 0.23.37 →
+0.23.43`, `hyper 1.8.1 → 1.11.0`, `webpki-roots 1.0.6 → 1.0.9`, with
+`reqwest 0.12.28` and `ring 0.17.14` unchanged) — no downgrades and no
+major jumps anywhere on the credential or network path. None of this is
+libcosmic's doing,
 but it is the relock's doing, and it is compiled into the SNI binary.
 The evidence that this move is benign is behavioral, not textual: the
 `--no-default-features` suite passed **58/58** after the relock (Test
@@ -144,7 +148,12 @@ the actual `c31e3d6` build:
    and there are zero occurrences of the old theme's dead `is_frosted`
    field.
 
-Full detail: `.superpowers/sdd/2026-08-08-frosted-glass/task-3-report.md`.
+Note that the `enable_blur` counts above are **source** greps against the
+two pinned checkouts under `~/.cargo/git/checkouts/libcosmic-*/`, not
+strings in the binary: `Cargo.toml`'s `[profile.release] strip = true`
+removes the symbol table, so `strings … | grep enable_blur` returns 0
+whether or not the blur path is compiled in, and is not a usable check
+against this project's release profile.
 
 **Visual verification: PENDING (Peter).** This doc asserts only that the
 correct binary was built and that the blur code path is compiled into it.
