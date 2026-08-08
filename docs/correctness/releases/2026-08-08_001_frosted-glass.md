@@ -155,12 +155,16 @@ removes the symbol table, so `strings … | grep enable_blur` returns 0
 whether or not the blur path is compiled in, and is not a usable check
 against this project's release profile.
 
-**Visual verification: PENDING (Peter).** This doc asserts only that the
-correct binary was built, that the blur code path is compiled into it, and
-that the applet was restarted onto it. No screenshot has been taken. The
-popup's actual translucent appearance — over a busy wallpaper, in both
-light and dark themes — is not claimed here and remains Peter's gate
-before merge.
+**Visual verification: CONFIRMED (Peter, 2026-08-08).** Peter restarted
+onto the new binary and confirmed the frosted popup renders correctly in
+the active Dark theme, which is what gated the merge. No agent made or
+could make this call — a green build proves the blur path is compiled in,
+never that it looks right.
+
+Scope of what was confirmed: the Dark theme, which is the active mode on
+this machine (`is_dark = true`). The Light-theme appearance was not
+separately exercised, and `frosted_applets` is `true` there too, so it
+takes the same path.
 
 **Frosting is already enabled on this machine — correction.** An earlier
 draft of this doc, and the spec, stated that frosted glass was OFF here

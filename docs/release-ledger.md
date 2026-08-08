@@ -33,7 +33,7 @@ Spec: `homelab2-docs/specs/tokentrkr/2026-08-08-frosted-glass-design.md`
 
 | Item | Risk | Status | Release doc / notes |
 |---|---|---|---|
-| Frosted-glass popup via libcosmic bump | Medium | Done | [2026-08-08_001](correctness/releases/2026-08-08_001_frosted-glass.md) — visual verify pending Peter |
+| Frosted-glass popup via libcosmic bump | Medium | Done | [2026-08-08_001](correctness/releases/2026-08-08_001_frosted-glass.md) — visually confirmed by Peter 2026-08-08 |
 
 ## Feature work
 
