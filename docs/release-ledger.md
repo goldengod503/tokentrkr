@@ -27,6 +27,14 @@ Specs: `homelab2-docs/specs/tokentrkr/2026-06-10-core-review-INDEX.md`
 | A3: theme-aware progress-bar track (B5/R3) | Medium | Done | [2026-07-11_001](correctness/releases/2026-07-11_001_applet-hardening.md) — visual verify pending Peter |
 | A4–A6: clamp helper, warn! logs, doc sync | Low | Not Started | Deferred; A6 doc items partially covered by refresh-architecture pass |
 
+## 2026-08-08 frosted glass
+
+Spec: `homelab2-docs/specs/tokentrkr/2026-08-08-frosted-glass-design.md`
+
+| Item | Risk | Status | Release doc / notes |
+|---|---|---|---|
+| Frosted-glass popup via libcosmic bump | Medium | Done | [2026-08-08_001](correctness/releases/2026-08-08_001_frosted-glass.md) — visual verify pending Peter |
+
 ## Feature work
 
 | Item | Risk | Status | Release doc / notes |
