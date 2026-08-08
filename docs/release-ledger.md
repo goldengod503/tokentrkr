@@ -42,3 +42,10 @@ Spec: `homelab2-docs/specs/tokentrkr/2026-08-08-frosted-glass-design.md`
 |---|---|---|---|
 | Model-scoped limits (Fable) from `limits` array | Low | Done | [2026-07-05_005](correctness/releases/2026-07-05_005_fable-scoped-limits.md) |
 | Smooth & theme-aware usage chart (Option C) | Low | Done | [2026-07-05_006](correctness/releases/2026-07-05_006_chart-smoothing.md) — visual verify pending Peter |
+
+## Packaging & tooling
+
+| Item | Risk | Status | Release doc / notes |
+|---|---|---|---|
+| Memory footprint optimization | Low | Done | [2026-05-17_001](portability/releases/2026-05-17_001_memory-optimization.md) |
+| `just install`: real copy into `~/.local`, no symlink into `target/` | Low | Done | [2026-08-08_001](portability/releases/2026-08-08_001_install-step.md) — prevents `build-sni`/`cargo clean` from silently swapping or breaking the installed applet |
