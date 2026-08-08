@@ -156,12 +156,30 @@ whether or not the blur path is compiled in, and is not a usable check
 against this project's release profile.
 
 **Visual verification: PENDING (Peter).** This doc asserts only that the
-correct binary was built and that the blur code path is compiled into it.
-Frosted glass is currently OFF in COSMIC Settings on this machine, no
-agent restarted the applet or `cosmic-panel` or swapped the running
-binary, and no screenshot has been taken. The popup's actual translucent
-appearance — over a busy wallpaper, in both light and dark themes — is not
-claimed here and remains Peter's gate before merge.
+correct binary was built, that the blur code path is compiled into it, and
+that the applet was restarted onto it. No screenshot has been taken. The
+popup's actual translucent appearance — over a busy wallpaper, in both
+light and dark themes — is not claimed here and remains Peter's gate
+before merge.
+
+**Frosting is already enabled on this machine — correction.** An earlier
+draft of this doc, and the spec, stated that frosted glass was OFF here
+and that no `frosted_*` keys were written. That was wrong: it was read
+from the legacy v1 `is_frosted` key only. The v2 theme config carries the
+real keys, and `frosted_applets` is **`true`** for both themes
+(`~/.config/cosmic/com.system76.CosmicTheme.{Dark,Light}/v2/frosted_applets`),
+with `com.system76.CosmicTheme.Mode/v1/is_dark = true`. So no Settings
+change is needed for the effect to appear; `frosted_panel` and
+`frosted_windows` are `false`, and `frosted_system_interface` is `true`.
+
+**Applet restart performed 2026-08-08, at Peter's explicit request.** The
+two applet instances then live had been spawned at 13:01 from a deleted
+inode — the window during which the SNI build occupied
+`target/release/tokentrkr` — so they were not the COSMIC applet at all.
+`cosmic-panel` does not respawn a killed applet child, so the panel itself
+was restarted (`pkill -x cosmic-panel`; `cosmic-session` respawned it).
+The applet now runs inode `30707290`, 28,935,128 bytes, matching the built
+COSMIC binary exactly.
 
 ## Docs Updated
 
