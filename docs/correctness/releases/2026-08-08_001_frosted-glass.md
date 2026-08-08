@@ -9,10 +9,29 @@ compositor-side background blur for the applet popup. TokenTrkr added no
 blur rendering code of its own; the popup now participates in a path that
 already exists in `libcosmic`/`cosmic-theme`: `Core::frosted()` maps
 `AppType::Applet` to `theme.frosted_applets`, which — when true — drives
-`iced::window::enable_blur`, which requests blur from the compositor via
-`org_kde_kwin_blur_manager`. Whether the popup is actually translucent at
-runtime is controlled entirely by the user's COSMIC Settings → Appearance
-frosted-glass toggle, not by anything TokenTrkr does.
+blur for the popup surface via `iced_winit::commands::blur::blur(id,
+region)` at surface creation (`iced::window::enable_blur` covers the
+main-window/toplevel path and the theme-change / `Action::BlurEnabled`
+paths, not popup creation). The compositor protocol requested is
+`ext_background_effect_v1` (`ExtBackgroundEffectManagerV1` /
+`ExtBackgroundEffectSurfaceV1`), gated on `Capability::Blur`. Whether the
+popup is actually translucent at runtime is controlled entirely by the
+user's COSMIC Settings → Appearance frosted-glass toggle, not by anything
+TokenTrkr does.
+
+> **Correction (added post-review, 2026-08-08):** this paragraph
+> originally named `org_kde_kwin_blur_manager` as the protocol. That is
+> wrong — there is no KWin blur anywhere in the pinned tree
+> (`grep -rn "org_kde_kwin_blur"` across the full pinned libcosmic
+> checkout returns 0 matches). The `c31e3d6` commit body carries the
+> same error and is **not** being amended — it is the first of two
+> commits on a branch about to be reviewed by its owner, and rewriting
+> it means a history rewrite. `ext_background_effect_v1` is the correct
+> protocol; treat this doc, not the commit message, as authoritative on
+> that point. The `org_kde_kwin_blur*` strings present in the release
+> binary are incidental — they come from `wayland-protocols-plasma`
+> being linked but unused, and were present before this bump too; they
+> are not evidence of a KWin blur path.
 
 The only API break surfaced by the bump was `surface::action::app_popup`
 gaining a leading `live_settings` parameter. TokenTrkr passes
@@ -53,7 +72,32 @@ static-state pattern was retained), and `iced::stream::channel`.
 | Popup, system frosting **off** | Opaque popup background | Unchanged — opaque popup background |
 | Popup, system frosting **on** | Opaque popup background (no blur path existed) | Translucent, compositor-blurred popup background |
 | Tray button | Transparent, inherits `frosted_panel` | Unchanged — already transparent, inherits `frosted_panel` |
-| SNI target (`--no-default-features`) | Does not link libcosmic | Unchanged — does not link libcosmic |
+| SNI target (`--no-default-features`) | Does not link libcosmic | Unaffected by libcosmic — does not link it. Not fully unchanged: its own dependencies moved with the shared-lockfile relock (below) |
+
+**SNI target dependency movement.** The "Unaffected by libcosmic" claim
+above is about the libcosmic bump specifically, not about the branch as a
+whole: the full `Cargo.lock` regeneration also moved the SNI target's own
+direct dependencies, most notably **`ksni` `0.3.3 → 0.3.6`**, the tray
+implementation used directly in first-party code (`use ksni::TrayMethods`
+— `src/main.rs:23`; `ksni::Handle<TrkrTray>` — `src/main.rs:72,80`; `use
+ksni::Icon` — `src/icon.rs:2`). `tokio` and the reqwest/rustls stack moved
+too (see Strength 5 of the review). None of this is libcosmic's doing,
+but it is the relock's doing, and it is compiled into the SNI binary.
+The evidence that this move is benign is behavioral, not textual: the
+`--no-default-features` suite passed **58/58** after the relock (Test
+Plan, below), covering the tray code paths that consume `ksni` directly.
+
+Separately, on the COSMIC-target side, the relock also carried **`wgpu`
+/ `naga` `27 → 28`**. Unlike `jni` (Android-gated, never compiled on this
+host) and `sha2` (rust-embed asset hashing only, not on the credential or
+network path), `wgpu`/`naga` *is* compiled into the COSMIC target
+(`wgpu 28.0.0 → cryoglyph → iced_wgpu → libcosmic → tokentrkr`) and is the
+renderer that actually draws the popup. A GPU-renderer major bump can
+shift rendering and driver behavior in ways no unit test observes, so
+Peter's pending visual check (below) should be understood as covering
+`wgpu` 28 as well as the blur wiring — if anything looks off in the
+popup's rendering beyond translucency (text, the chart, the endpoint
+dots), the renderer bump is a more likely cause than the blur path.
 
 ## Test Plan
 
