@@ -87,32 +87,57 @@ native panel applet with popup UI:
 cargo build --release
 ```
 
-Install the applet:
+Install the applet — build, copy the binary and desktop entry into `~/.local`,
+and restart the panel, in one step:
 
 ```bash
-# Put the binary in PATH
-sudo cp target/release/tokentrkr /usr/bin/
+just restart
+```
 
-# Install the desktop entry for COSMIC panel discovery
-sudo cp resources/com.github.goldengod503.TokenTrkr.desktop /usr/share/applications/
+Or without `just`:
 
-# Restart the panel to pick up the new applet
+```bash
+cargo build --release
+install -Dm755 target/release/tokentrkr ~/.local/bin/tokentrkr
+install -Dm644 resources/com.github.goldengod503.TokenTrkr.desktop \
+    ~/.local/share/applications/com.github.goldengod503.TokenTrkr.desktop
 pkill cosmic-panel
 ```
 
 Then add **TokenTrkr** to your panel via COSMIC Settings > Desktop > Panel > Applets.
 
+**Install the binary — don't symlink `~/.local/bin/tokentrkr` at
+`target/release/tokentrkr`.** Both build targets write that one path, so a later
+`just build-sni` would silently replace your running panel applet with the SNI
+tray, and `cargo clean` would delete it outright. `just install` copies instead,
+which decouples the installed applet from the build tree. `install` unlinks the
+destination before writing, so it is safe to run while the applet is live — the
+running process keeps its old inode until the panel restarts.
+
+`~/.local/bin` must be on your `PATH` for the desktop entry's `Exec=tokentrkr`
+to resolve; it is by default on most distributions. To install system-wide
+instead, copy to `/usr/bin` and `/usr/share/applications/` with `sudo`.
+
 The app auto-detects which desktop you're running — on COSMIC it launches the native applet, elsewhere it falls back to the SNI tray icon.
 
 ### Autostart (SNI mode)
 
-Copy the desktop file to your autostart directory:
+The entry in `resources/` is a COSMIC applet declaration (`X-CosmicApplet=true`,
+`NoDisplay=true`) — the panel launches it, so it is not an autostart file. For
+SNI mode, write your own:
 
 ```bash
-cp tokentrkr.desktop ~/.config/autostart/
+install -Dm755 target/release/tokentrkr ~/.local/bin/tokentrkr
+cat > ~/.config/autostart/tokentrkr.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=TokenTrkr
+Exec=tokentrkr
+Terminal=false
+EOF
 ```
 
-Edit the `Exec=` line to point to the full path of the binary.
+Use the full path in `Exec=` if `~/.local/bin` is not on your session's `PATH`.
 
 ## Configuration
 
