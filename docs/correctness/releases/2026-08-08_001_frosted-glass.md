@@ -1,0 +1,220 @@
+# 2026-08-08 — Frosted glass: translucent applet popup via libcosmic bump
+
+## Summary
+
+This is a dependency bump, not a rendering change. The `libcosmic` pin
+moved from `17291536a10124a053b40c49bb459d7b5085331b` to
+`8a017a15ee7753241c0a631b4294a68edf79b13b` to pick up upstream's
+compositor-side background blur for the applet popup. TokenTrkr added no
+blur rendering code of its own; the popup now participates in a path that
+already exists in `libcosmic`/`cosmic-theme`: `Core::frosted()` maps
+`AppType::Applet` to `theme.frosted_applets`, which — when true — drives
+blur for the popup surface via `iced_winit::commands::blur::blur(id,
+region)` at surface creation (`iced::window::enable_blur` covers the
+main-window/toplevel path and the theme-change / `Action::BlurEnabled`
+paths, not popup creation). The compositor protocol requested is
+`ext_background_effect_v1` (`ExtBackgroundEffectManagerV1` /
+`ExtBackgroundEffectSurfaceV1`), gated on `Capability::Blur`. Whether the
+popup is actually translucent at runtime is controlled entirely by the
+user's COSMIC Settings → Appearance frosted-glass toggle, not by anything
+TokenTrkr does.
+
+> **Correction (added post-review, 2026-08-08):** this paragraph
+> originally named `org_kde_kwin_blur_manager` as the protocol. That is
+> wrong — there is no KWin blur anywhere in the pinned tree
+> (`grep -rn "org_kde_kwin_blur"` across the full pinned libcosmic
+> checkout returns 0 matches). `ext_background_effect_v1` is the correct
+> protocol. The code commit carried the same error in its body and has
+> been reworded — the branch was rebased before it was ever pushed, so
+> the code commit is now `2d0f88d` (was `c31e3d6`). Content is
+> byte-identical across the rebase; only commit messages changed. The
+> `org_kde_kwin_blur*` strings present in the release
+> binary are incidental — they come from `wayland-protocols-plasma`
+> being linked but unused, and were present before this bump too; they
+> are not evidence of a KWin blur path.
+
+The only API break surfaced by the bump was `surface::action::app_popup`
+gaining a leading `live_settings` parameter. TokenTrkr passes
+`LiveSettings::default()` (all fields `None`), so the popup inherits the
+surface-type defaults rather than carrying a TokenTrkr-local override.
+
+## Scope
+
+### Files Created
+
+- docs/correctness/releases/2026-08-08_001_frosted-glass.md (this doc)
+
+### Files Modified
+
+- Cargo.toml — `libcosmic` `rev` pin updated (1 line).
+- Cargo.lock — full regeneration. The locked `tokio 1.50.0` and
+  `zbus 5.14.0` no longer satisfied the new libcosmic's transitive
+  requirements (`cosmic-config` wants tokio `^1.52`,
+  `cosmic-settings-daemon` wants zbus `^5.15`); `cargo update -p tokio`
+  alone still conflicted on zbus, so the lockfile was deleted and
+  regenerated from scratch rather than incrementally updated.
+- src/cosmic_app.rs — 5 lines: the `LiveSettings` import added to the
+  existing `cosmic::surface::action::{app_popup, destroy_popup}` use, and
+  a `|_state: &TokenTrkrApplet| LiveSettings::default()` argument (plus
+  comment) added to the `app_popup::<TokenTrkrApplet>(...)` call.
+
+No API breaks beyond `app_popup` gaining the `live_settings` parameter
+turned up. Verified unchanged across the bump: the `Application` trait,
+`applet::run`, `applet::style`,
+`Context::{autosize_window, get_popup_settings, popup_container}`,
+`Subscription::run_with` (still an `fn` pointer, so the `OnceLock`
+static-state pattern was retained), and `iced::stream::channel`.
+
+## Behavioral Impact
+
+| Scenario | Before | After |
+|---|---|---|
+| Popup, system frosting **off** | Opaque popup background | Unchanged — opaque popup background |
+| Popup, system frosting **on** | Opaque popup background (no blur path existed) | Translucent, compositor-blurred popup background |
+| Tray button | Transparent, inherits `frosted_panel` | Unchanged — already transparent, inherits `frosted_panel` |
+| SNI target (`--no-default-features`) | Does not link libcosmic | Unaffected by libcosmic — does not link it. Not fully unchanged: its own dependencies moved with the shared-lockfile relock (below) |
+
+**SNI target dependency movement.** The "Unaffected by libcosmic" claim
+above is about the libcosmic bump specifically, not about the branch as a
+whole: the full `Cargo.lock` regeneration also moved the SNI target's own
+direct dependencies, most notably **`ksni` `0.3.3 → 0.3.6`**, the tray
+implementation used directly in first-party code (`use ksni::TrayMethods`
+— `src/main.rs:23`; `ksni::Handle<TrkrTray>` — `src/main.rs:72,80`; `use
+ksni::Icon` — `src/icon.rs:2`). `tokio` and the reqwest/rustls stack moved
+too, all forward-only (`tokio 1.50.0 → 1.53.1`, `rustls 0.23.37 →
+0.23.43`, `hyper 1.8.1 → 1.11.0`, `webpki-roots 1.0.6 → 1.0.9`, with
+`reqwest 0.12.28` and `ring 0.17.14` unchanged) — no downgrades and no
+major jumps anywhere on the credential or network path. None of this is
+libcosmic's doing,
+but it is the relock's doing, and it is compiled into the SNI binary.
+The evidence that this move is benign is behavioral, not textual: the
+`--no-default-features` suite passed **58/58** after the relock (Test
+Plan, below), covering the tray code paths that consume `ksni` directly.
+
+Separately, on the COSMIC-target side, the relock also carried **`wgpu`
+/ `naga` `27 → 28`**. Unlike `jni` (Android-gated, never compiled on this
+host) and `sha2` (rust-embed asset hashing only, not on the credential or
+network path), `wgpu`/`naga` *is* compiled into the COSMIC target
+(`wgpu 28.0.0 → cryoglyph → iced_wgpu → libcosmic → tokentrkr`) and is the
+renderer that actually draws the popup. A GPU-renderer major bump can
+shift rendering and driver behavior in ways no unit test observes, so
+Peter's pending visual check (below) should be understood as covering
+`wgpu` 28 as well as the blur wiring — if anything looks off in the
+popup's rendering beyond translucency (text, the chart, the endpoint
+dots), the renderer bump is a more likely cause than the blur path.
+
+## Test Plan
+
+```
+cargo test                        →  69 passed; 0 failed
+cargo test --no-default-features  →  58 passed; 0 failed
+```
+
+Both counts match the pre-bump baseline exactly (measured in Task 2 on
+this same commit `2d0f88d`; not re-run for this doc).
+
+Release builds, SNI-first then COSMIC-last (per project convention, since
+both targets write `target/release/tokentrkr`):
+
+- `cargo build --release --no-default-features` — clean, 13 pre-existing
+  dead-code warnings, binary 9,418,976 bytes (≈9.0 MB).
+- `cargo build --release` — clean, 3 pre-existing dead-code warnings,
+  final binary **28,935,128 bytes** (≈28.9 MB) at the path the applet
+  symlink points at.
+
+**Blur-path evidence.** The plan's original check
+(`strings -a target/release/tokentrkr | grep -c "enable_blur"`, expecting
+`> 0`) is unsound and was not used as evidence: `Cargo.toml:39` sets
+`[profile.release] strip = true`, so Rust function identifiers do not
+survive into the stripped binary's strings, and the command in fact
+returned `0` on the built binary — a result that proves nothing either
+way, since it would return `0` whether or not the blur path is compiled
+in. It was replaced with a three-part evidence chain, all measured against
+the actual `2d0f88d` build:
+
+1. **Compile-time gate is active.** `src/app/cosmic.rs:943` guards the
+   blur-toggling block with `#[cfg(wayland_platform)]`. libcosmic's build
+   script emits that cfg for this build
+   (`target/release/build/libcosmic-*/output` contains
+   `cargo:rustc-cfg=wayland_platform`), so the block compiles in.
+2. **Source differential.** The new pinned rev (`8a017a1`) has 10
+   `enable_blur` call sites in `src/app/cosmic.rs` (lines 948, 1047, 1175,
+   1315, 1465, 1523, 1581, 1596, 1614, 1629). The old pinned rev
+   (`1729153`) has zero occurrences of `enable_blur` anywhere in `src/`.
+3. **Binary differential.** The stripped binary's surviving strings (serde
+   field names) show the new `cosmic-theme` struct is what got linked:
+   `frosted_applets`, `frosted_panel`, `frosted_windows`,
+   `frosted_system_interface`, and `frosted_maximized_apps` are present,
+   and there are zero occurrences of the old theme's dead `is_frosted`
+   field.
+
+Note that the `enable_blur` counts above are **source** greps against the
+two pinned checkouts under `~/.cargo/git/checkouts/libcosmic-*/`, not
+strings in the binary: `Cargo.toml`'s `[profile.release] strip = true`
+removes the symbol table, so `strings … | grep enable_blur` returns 0
+whether or not the blur path is compiled in, and is not a usable check
+against this project's release profile.
+
+**Visual verification: CONFIRMED (Peter, 2026-08-08).** Peter restarted
+onto the new binary and confirmed the frosted popup renders correctly in
+the active Dark theme, which is what gated the merge. No agent made or
+could make this call — a green build proves the blur path is compiled in,
+never that it looks right.
+
+Scope of what was confirmed: the Dark theme, which is the active mode on
+this machine (`is_dark = true`). The Light-theme appearance was not
+separately exercised, and `frosted_applets` is `true` there too, so it
+takes the same path.
+
+**Frosting is already enabled on this machine — correction.** An earlier
+draft of this doc, and the spec, stated that frosted glass was OFF here
+and that no `frosted_*` keys were written. That was wrong: it was read
+from the legacy v1 `is_frosted` key only. The v2 theme config carries the
+real keys, and `frosted_applets` is **`true`** for both themes
+(`~/.config/cosmic/com.system76.CosmicTheme.{Dark,Light}/v2/frosted_applets`),
+with `com.system76.CosmicTheme.Mode/v1/is_dark = true`. So no Settings
+change is needed for the effect to appear; `frosted_panel` and
+`frosted_windows` are `false`, and `frosted_system_interface` is `true`.
+
+**Applet restart performed 2026-08-08, at Peter's explicit request.** The
+two applet instances then live had been spawned at 13:01 from a deleted
+inode — the window during which the SNI build occupied
+`target/release/tokentrkr` — so they were not the COSMIC applet at all.
+`cosmic-panel` does not respawn a killed applet child, so the panel itself
+was restarted (`pkill -x cosmic-panel`; `cosmic-session` respawned it).
+The applet now runs inode `30707290`, 28,935,128 bytes, matching the built
+COSMIC binary exactly.
+
+## Docs Updated
+
+- docs/release-ledger.md — new section for this work stream.
+
+`CLAUDE.md`'s "Last verified against commit" line and `docs/ARCHITECTURE.md`
+are intentionally not touched: this change shifts no module boundaries,
+ownership, or state machines, so it does not meet the
+`/robot:refresh-architecture` trigger.
+
+## Rollback Plan
+
+Single code commit `2d0f88d` on `feat/frosted-glass`.
+`git revert 2d0f88d` restores: the libcosmic pin at
+`17291536a10124a053b40c49bb459d7b5085331b`, the prior `Cargo.lock`, and
+the 2-argument `app_popup` call (no `LiveSettings`).
+
+## Open Questions / Decisions
+
+- **No TokenTrkr blur override added.** The `app_popup` call passes
+  `LiveSettings::default()` (all fields `None`) rather than a
+  TokenTrkr-local override, so the popup's frosting follows whatever the
+  user has set in COSMIC Settings → Appearance. Adding a TokenTrkr-level
+  frosting config setting was explicitly out of scope for this work.
+- **`feat/popup-redesign-hud` remains frozen and out of scope.** No work
+  from that branch or its stashes was revived, rebased, or cherry-picked
+  as part of this bump.
+
+## References
+
+- Spec: `homelab2-docs/specs/tokentrkr/2026-08-08-frosted-glass-design.md`
+- Prior libcosmic bump: `565748f` ("Fix COSMIC popup crash by upgrading
+  libcosmic and migrating to new APIs").
+- Branched from main at `e9688f1`.
