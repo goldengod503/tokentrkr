@@ -8,7 +8,7 @@ System tray app that tracks your Claude token usage on Linux. Works as a **nativ
 
 <img src="assets/TokenTrkr_SessionWeeklyView.png" alt="COSMIC Applet" width="320">
 
-Features a color-coded dot + percentage in the panel, click-to-open popup with progress bars, usage history chart, and a spinning refresh indicator when fetching usage data. Toggle the tray to show **Session**, **Weekly**, or **Both** windows side-by-side.
+Features a color-coded dot + percentage in the panel, click-to-open popup with progress bars, usage history chart, and a spinning refresh indicator when fetching usage data. Toggle the tray to show **Session**, **Weekly**, or **Both** windows side-by-side. The popup renders as **frosted glass** — translucent with compositor-side background blur — when you have frosted glass enabled in COSMIC Settings.
 
 ## What it does
 
@@ -28,6 +28,7 @@ Click the tray icon to see:
 - Extra usage billing tracker
 - Usage history line chart with selectable time ranges (1h / 6h / 1d / 7d / 30d)
 - Refresh, Dashboard, and a tray-mode toggle (cycles Session → Weekly → Both) — persists across restarts
+- Frosted-glass popup background that follows your COSMIC frosted-glass setting
 
 **SNI tray menu (KDE, GNOME, etc.):**
 ```
@@ -67,17 +68,23 @@ Quit
 ```bash
 git clone https://github.com/goldengod503/tokentrkr.git
 cd tokentrkr
-cargo build --release
+cargo build --release --no-default-features
 ```
 
 The binary is at `target/release/tokentrkr`.
 
+`--no-default-features` matters: the `cosmic` feature is **on by default**, so
+a plain `cargo build --release` produces the COSMIC applet, not the SNI tray.
+Both targets write the same path, so whichever you build last owns
+`target/release/tokentrkr`.
+
 ### COSMIC Panel Applet (Pop!_OS / COSMIC)
 
-Build with the `cosmic` feature for a native panel applet with popup UI:
+The `cosmic` feature is on by default, so a plain release build gives you the
+native panel applet with popup UI:
 
 ```bash
-cargo build --release --features cosmic
+cargo build --release
 ```
 
 Install the applet:
@@ -135,6 +142,20 @@ tray_mode = "session"     # "session" | "weekly" | "both" — controls what the 
 | Extra usage tracking | Progress bar | Text + block bar |
 | Usage history chart | Line chart (canvas) | — |
 | Time range selector | 1h / 6h / 1d / 7d / 30d | — |
+| Frosted-glass popup | Follows COSMIC frosted-glass setting | — |
+
+### Frosted glass
+
+The COSMIC popup is translucent with compositor-side background blur when
+frosted glass is on. TokenTrkr adds no setting of its own — it follows
+**COSMIC Settings → Appearance**, like the built-in applets do, reading the
+same `frosted_applets` value. Turn frosting off there and the popup goes back
+to an opaque background.
+
+This needs a compositor that implements the `ext-background-effect-v1`
+protocol; `cosmic-comp` does. The panel button is unaffected — it is already
+transparent and inherits whatever the panel itself is doing (`frosted_panel`),
+which is COSMIC's business, not TokenTrkr's.
 
 ## How it works
 
