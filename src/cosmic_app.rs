@@ -92,6 +92,12 @@ pub struct TokenTrkrApplet {
 const MIN_SPIN_CYCLES: f32 = 3.0;
 const MIN_SPIN_PHASE: f32 = MIN_SPIN_CYCLES * std::f32::consts::TAU;
 
+const POPUP_MAX_WIDTH: f32 = 360.0;
+const POPUP_PADDING: u16 = 12;
+// The popup always lays out at its max width (Fill rows), so this is the
+// chart's rendered width; drawing the SVG at that size keeps it unscaled.
+const CHART_WIDTH: f64 = (POPUP_MAX_WIDTH - 2.0 * POPUP_PADDING as f32) as f64;
+
 impl Default for TokenTrkrApplet {
     fn default() -> Self {
         Self {
@@ -253,7 +259,7 @@ fn smooth_path(pts: &[(f64, f64)]) -> String {
 }
 
 fn build_chart_svg(points: &[UsageDataPoint], range: TimeRange, is_dark: bool) -> String {
-    let w = 280.0_f64;
+    let w = CHART_WIDTH;
     let h = 130.0_f64;
     let pl = 30.0_f64; // padding left
     let pr = 8.0_f64;  // padding right
@@ -660,7 +666,7 @@ impl cosmic::Application for TokenTrkrApplet {
                                 None,
                             );
                             popup_settings.positioner.size_limits = Limits::NONE
-                                .max_width(360.0)
+                                .max_width(POPUP_MAX_WIDTH)
                                 .min_width(280.0)
                                 .min_height(100.0)
                                 .max_height(600.0);
@@ -830,7 +836,7 @@ impl cosmic::Application for TokenTrkrApplet {
 
 impl TokenTrkrApplet {
     fn popup_view(&self) -> Element<'_, Message> {
-        let mut col = widget::Column::new().spacing(8).padding(12);
+        let mut col = widget::Column::new().spacing(8).padding(POPUP_PADDING);
 
         // Title
         let title = if let Some(ref snap) = self.snapshot {
@@ -945,15 +951,26 @@ impl TokenTrkrApplet {
             col = col.push(widget::divider::horizontal::default());
 
             // Time range picker
-            let mut range_row = widget::Row::new().spacing(4);
+            // Custom buttons: the text-button builder left-aligns its label
+            // when stretched, so center it ourselves.
+            let button_height = cosmic::theme::spacing().space_l;
+            let mut range_row = widget::Row::new().spacing(4).width(Length::Fill);
             for &range in TimeRange::ALL {
-                let is_selected = range == self.selected_range;
-                let btn = if is_selected {
-                    widget::button::suggested(range.label())
+                let class = if range == self.selected_range {
+                    cosmic::theme::Button::Suggested
                 } else {
-                    widget::button::standard(range.label())
+                    cosmic::theme::Button::Standard
                 };
-                range_row = range_row.push(btn.on_press(Message::SelectTimeRange(range)));
+                let label = widget::container(widget::text(range.label()).size(14.0))
+                    .center(Length::Fill);
+                range_row = range_row.push(
+                    widget::button::custom(label)
+                        .class(class)
+                        .padding(0)
+                        .width(Length::Fill)
+                        .height(button_height)
+                        .on_press(Message::SelectTimeRange(range)),
+                );
             }
             col = col.push(range_row);
 
@@ -964,7 +981,7 @@ impl TokenTrkrApplet {
             let svg_handle = widget::svg::Handle::from_memory(svg_data.into_bytes());
             col = col.push(
                 widget::Svg::new(svg_handle)
-                    .width(Length::Fixed(280.0))
+                    .width(Length::Fill)
                     .height(Length::Fixed(130.0)),
             );
 

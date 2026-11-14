@@ -42,6 +42,7 @@ Spec: `homelab2-docs/specs/tokentrkr/2026-08-08-frosted-glass-design.md`
 |---|---|---|---|
 | Model-scoped limits (Fable) from `limits` array | Low | Done | [2026-07-05_005](correctness/releases/2026-07-05_005_fable-scoped-limits.md) |
 | Smooth & theme-aware usage chart (Option C) | Low | Done | [2026-07-05_006](correctness/releases/2026-07-05_006_chart-smoothing.md) — visual verify pending Peter |
+| Popup chart and range buttons fill the popup width | Low | Done | [2026-11-14_001](correctness/releases/2026-11-14_001_popup-full-width.md) — visually confirmed by Peter 2026-11-14 |
 
 ## Packaging & tooling
 
