@@ -29,15 +29,16 @@ impl fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
-/// Sentinel error for 401 responses. Distinct from `RateLimited` so the
-/// polling loop does not retry — credentials are revoked or invalid and
-/// the user must re-authenticate.
+/// Sentinel error for a rejected sign-in: a 401 from the usage API or a 4xx
+/// (other than 429) from the token-refresh endpoint. Distinct from
+/// `RateLimited` so the polling loop does not retry — the credentials are
+/// unusable until the user re-authenticates in Claude Code.
 #[derive(Debug)]
 pub struct Unauthorized;
 
 impl fmt::Display for Unauthorized {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Authentication failed — re-login in Claude Code")
+        write!(f, "Signed out of Claude — run /login in Claude Code, then click Refresh")
     }
 }
 
