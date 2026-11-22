@@ -202,7 +202,7 @@ impl ClaudeProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            bail!("Token refresh failed ({}): {}", status, body);
+            return Err(refresh_failure(status, &body));
         }
 
         let token_resp: TokenRefreshResponse = resp
@@ -468,6 +468,20 @@ impl Provider for ClaudeProvider {
     }
 }
 
+/// The raw response body is JSON with a request id — useful in the log,
+/// unreadable in a tray popup — so it goes to the log only for 4xx.
+fn refresh_failure(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        warn!("Token refresh rate limited (429): {}", body);
+        return anyhow::Error::new(crate::provider::RateLimited { retry_after: None });
+    }
+    if status.is_client_error() {
+        warn!("Token refresh rejected ({}): {}", status, body);
+        return anyhow::Error::new(crate::provider::Unauthorized);
+    }
+    anyhow::anyhow!("Token refresh failed ({}): {}", status, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,8 +528,33 @@ mod tests {
     fn unauthorized_sentinel_renders_user_facing_message() {
         assert_eq!(
             crate::provider::Unauthorized.to_string(),
-            "Authentication failed — re-login in Claude Code"
+            "Signed out of Claude — run /login in Claude Code, then click Refresh"
         );
+    }
+
+    #[test]
+    fn refresh_400_invalid_request_becomes_unauthorized() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Invalid request format"}}"#;
+
+        let err = refresh_failure(reqwest::StatusCode::BAD_REQUEST, body);
+
+        assert!(err.downcast_ref::<crate::provider::Unauthorized>().is_some());
+        assert!(!format!("{:#}", err).contains("invalid_request_error"));
+    }
+
+    #[test]
+    fn refresh_429_stays_rate_limited() {
+        let err = refresh_failure(reqwest::StatusCode::TOO_MANY_REQUESTS, "");
+
+        assert!(err.downcast_ref::<crate::provider::RateLimited>().is_some());
+    }
+
+    #[test]
+    fn refresh_5xx_stays_generic_transient() {
+        let err = refresh_failure(reqwest::StatusCode::BAD_GATEWAY, "upstream");
+
+        assert!(err.downcast_ref::<crate::provider::Unauthorized>().is_none());
+        assert!(err.downcast_ref::<crate::provider::RateLimited>().is_none());
     }
 
     #[test]
